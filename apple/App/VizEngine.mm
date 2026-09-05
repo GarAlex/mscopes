@@ -13,6 +13,7 @@
 #include "GpuFx.h"
 #import  "Analyzer.h"
 #import  "SystemAudioTap.h"
+#include <os/log.h>
 #include "EffectHost.h"
 #include "BuiltinEffects.h"
 #include "Presets.h"
@@ -32,6 +33,17 @@
 // SIGUSR1 → snapshot the whole app window to PNG (dev aid; captures SwiftUI too).
 static std::atomic<bool> gWantWindowSnapshot{false};
 static void wvOnSIGUSR1(int) { gWantWindowSnapshot = true; }
+
+// SIGUSR2: test aid for the tap watchdog — stops the tap's IO the way a
+// device change or a sleep does, then the engine must recover on its own.
+@interface VizEngine ()
+- (void)debugStallTap;
+@end
+static VizEngine* gEngineForSignals = nil;
+static void wvOnSIGUSR2(int)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{ [gEngineForSignals debugStallTap]; });
+}
 
 // ---------------------------------------------------------------------------
 //  Private drawing view (kept out of the Swift-visible header on purpose).
@@ -188,6 +200,17 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     viz::Analyzer         _analyzer;
     viz::SystemAudioTap*  _tap;
     WVRenderView*         _view;
+    // Tap supervision: a live tap stops delivering when the default output
+    // device changes, its sample rate changes, or the Mac sleeps. The tick
+    // watches the callback counter and re-opens the tap when it stalls; the
+    // device-change and wake listeners do it eagerly.
+    unsigned long long    _cbsSeen;
+    CFTimeInterval        _cbsSeenAt;
+    CFTimeInterval        _lastTapRestart;
+    NSInteger             _tapRestarts;
+    BOOL                  _listenersInstalled;
+    id                    _wakeObserver;
+    AudioObjectPropertyListenerBlock _defaultDeviceListener;
     // Frame pacing: a CVDisplayLink fires on its own thread exactly at vsync
     // and hands the tick to the (idle) main thread. The AppKit-integrated
     // NSView displayLink was tried first and measured: it is delivered inside
@@ -226,7 +249,9 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
         _sensitivity = 1.0f;
         _aspectMode = 1;               // fill: shapes stay round fullscreen
         _cbs = 0;
+        gEngineForSignals = self;
         signal(SIGUSR1, wvOnSIGUSR1);
+        signal(SIGUSR2, wvOnSIGUSR2);
 
         // Start on the first built-in preset — or, for scripted runs and
         // profiling from the shell, on MSCOPES_PRESET=<file.avs|.json>.
@@ -458,10 +483,16 @@ static NSString* safeNS(const std::string& s)
     _host.move((size_t)from, (size_t)to);
 }
 
-- (BOOL)start:(NSError **)error
+static os_log_t wvEngineLog(void)
 {
-    if (_capturing) return YES;
+    static os_log_t l = os_log_create("com.writea.viz", "engine");
+    return l;
+}
 
+/// Create and start a fresh tap (the previous one, if any, is torn down).
+- (BOOL)openTap:(std::string&)err
+{
+    if (_tap) { _tap->stop(); delete _tap; _tap = nullptr; }
     viz::Analyzer* an = &_analyzer;
     std::atomic<unsigned long long>* cbs = &_cbs;
     _tap = new viz::SystemAudioTap(
@@ -470,22 +501,105 @@ static NSString* safeNS(const std::string& s)
             an->push(interleaved, frames, channels);
             cbs->fetch_add(1);
         });
+    if (!_tap->start(err)) {
+        delete _tap; _tap = nullptr;
+        return NO;
+    }
+    _sampleRate = _tap->sampleRate();
+    _channels   = _tap->channels();
+    _cbsSeen    = _cbs.load();
+    _cbsSeenAt  = CACurrentMediaTime();
+    return YES;
+}
+
+- (void)debugStallTap
+{
+    if (_tap) { _tap->pauseForTest(); fprintf(stderr, "[VizEngine] SIGUSR2: tap IO stopped for the watchdog test\n"); }
+}
+
+/// Re-open the tap in place. Main thread only. A failure is logged and left
+/// to the watchdog, which tries again a few seconds later.
+- (void)restartTapBecause:(const char*)why
+{
+    if (!_capturing) return;
+    _lastTapRestart = CACurrentMediaTime();
+    std::string err;
+    if ([self openTap:err]) {
+        _tapRestarts++;
+        os_log(wvEngineLog(), "tap re-opened (%{public}s): %.0f Hz, %d ch, restart #%ld",
+               why, _sampleRate, (int)_channels, (long)_tapRestarts);
+        fprintf(stderr, "[VizEngine] tap re-opened (%s): %.0f Hz, %d ch\n", why, _sampleRate, _channels);
+    } else {
+        os_log_error(wvEngineLog(), "tap re-open failed (%{public}s): %{public}s", why, err.c_str());
+        fprintf(stderr, "[VizEngine] tap re-open failed (%s): %s\n", why, err.c_str());
+        _cbsSeenAt = CACurrentMediaTime();   // back off; the watchdog retries
+    }
+}
+
+- (void)scheduleTapRestartAfter:(double)seconds because:(const char*)why
+{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [self restartTapBecause:why]; });
+}
+
+- (void)installTapListeners
+{
+    if (_listenersInstalled) return;
+    _listenersInstalled = YES;
+    // Default output device changed (headphones, AirPods, a display, …).
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    __weak VizEngine* weakSelf = self;
+    _defaultDeviceListener = ^(UInt32, const AudioObjectPropertyAddress*) {
+        [weakSelf scheduleTapRestartAfter:0.6 because:"default output device changed"];
+    };
+    AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &addr,
+                                        dispatch_get_main_queue(), _defaultDeviceListener);
+    // Sleep/wake: the aggregate device rarely survives it.
+    _wakeObserver = [[NSWorkspace sharedWorkspace].notificationCenter
+        addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification*) {
+            [weakSelf scheduleTapRestartAfter:1.5 because:"the Mac woke"];
+        }];
+}
+
+- (void)removeTapListeners
+{
+    if (!_listenersInstalled) return;
+    _listenersInstalled = NO;
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &addr,
+                                           dispatch_get_main_queue(), _defaultDeviceListener);
+    _defaultDeviceListener = nil;
+    if (_wakeObserver) {
+        [[NSWorkspace sharedWorkspace].notificationCenter removeObserver:_wakeObserver];
+        _wakeObserver = nil;
+    }
+}
+
+- (NSInteger)tapRestarts { return _tapRestarts; }
+
+- (BOOL)start:(NSError **)error
+{
+    if (_capturing) return YES;
 
     std::string err;
-    if (!_tap->start(err)) {
+    if (![self openTap:err]) {
         if (error) {
             *error = [NSError errorWithDomain:@"com.writea.viz.engine" code:1
                 userInfo:@{ NSLocalizedDescriptionKey:
                     [NSString stringWithUTF8String:err.c_str()] }];
         }
         fprintf(stderr, "[VizEngine] start failed: %s\n", err.c_str());
-        delete _tap; _tap = nullptr;
         return NO;
     }
 
-    _sampleRate = _tap->sampleRate();
-    _channels   = _tap->channels();
-    _capturing  = YES;
+    _capturing   = YES;
+    _tapRestarts = 0;
+    [self installTapListeners];
     fprintf(stderr, "[VizEngine] capturing: %.0f Hz, %d ch\n", _sampleRate, _channels);
 
     _lastTick = 0;
@@ -541,6 +655,7 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     if (_cvLink) { CVDisplayLinkStop(_cvLink); CVDisplayLinkRelease(_cvLink); _cvLink = nullptr; }
 #pragma clang diagnostic pop
     [_fallbackTimer invalidate]; _fallbackTimer = nil;
+    [self removeTapListeners];
     if (_tap) { _tap->stop(); delete _tap; _tap = nullptr; }
     _capturing = NO;
 }
@@ -551,6 +666,15 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
 
     // Real elapsed time (clamped: a stall or a debugger pause isn't a 5 s frame).
     CFTimeInterval now = CACurrentMediaTime();
+
+    // Stall watchdog: the tap delivers callbacks continuously, silence
+    // included, so none for 3 s means it died — re-open it (at most every 5 s).
+    {
+        unsigned long long c = _cbs.load();
+        if (c != _cbsSeen) { _cbsSeen = c; _cbsSeenAt = now; }
+        else if (_capturing && _cbsSeenAt > 0 && now - _cbsSeenAt > 3.0 && now - _lastTapRestart > 5.0)
+            [self restartTapBecause:"no audio callbacks for 3 s"];
+    }
     double dt = _lastTick > 0 ? now - _lastTick : 1.0 / 60.0;
     _lastTick = now;
     _fxCtx.dt = std::max(1.0 / 240.0, std::min(1.0 / 20.0, dt));

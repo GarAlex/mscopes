@@ -39,4 +39,7 @@ app's **Install…** button installs for Music.
 - `WV_POLL_HZ=<n>` changes the sidebar readout rate.
 - `kill -USR1 <pid>` writes the window and the raw engine frame as PNGs to the temp
   directory (path is logged).
+- `kill -USR2 <pid>` stops the audio tap's IO in place (what a device change or
+  sleep does to it); the engine's watchdog must re-open it within ~3 s and the
+  sidebar shows "reconnected ×1".
 - `MSCOPES_NO_GPU=1` forces every effect's CPU path.

@@ -27,6 +27,11 @@ public:
     bool start(std::string& err);
     void stop();
 
+    // Test aid: stop the IO proc but keep the objects, so the engine's
+    // stall watchdog sees callbacks cease — exactly what a device change or
+    // a sleep/wake does to a live tap. (SIGUSR2 in the app triggers it.)
+    void pauseForTest();
+
     double sampleRate() const { return _sampleRate; }
     int    channels()   const { return _channels; }
 

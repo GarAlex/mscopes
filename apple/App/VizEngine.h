@@ -27,6 +27,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) float bpm;       // tempo estimate, 0 until locked
 @property (nonatomic, readonly) float beatLevel; // 1 on a detected beat, decays to 0
 @property (nonatomic, readonly) unsigned long long audioCallbacks;
+/// Times the tap was re-opened on its own (callbacks stopped, output device
+/// changed, or the Mac woke) since capture started.
+@property (nonatomic, readonly) NSInteger tapRestarts;
 
 /// Log-spaced spectrum bands (0..1) of the latest frame, for small meters
 /// such as the live Dock icon. Fills `out[0..count)`; count ≤ 32.

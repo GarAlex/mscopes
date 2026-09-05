@@ -38,6 +38,7 @@ struct AudioSection: View {
                     Circle().fill(model.capturing ? .green : .red).frame(width: 9, height: 9)
                     Text(model.capturing
                          ? "Capturing · \(Int(model.sampleRate)) Hz · \(model.channels) ch"
+                           + (model.tapRestarts > 0 ? " · reconnected ×\(model.tapRestarts)" : "")
                          : "Not capturing")
                         .font(.caption).foregroundStyle(.secondary)
                 }

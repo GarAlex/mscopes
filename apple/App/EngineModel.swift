@@ -12,6 +12,8 @@ final class EngineModel: ObservableObject {
 
     // Live status (refreshed by a display-linked timer).
     @Published var capturing = false { didSet { if capturing != oldValue { syncDockTile() } } }
+    /// Times the engine re-opened the tap by itself (device change, wake, stall).
+    @Published var tapRestarts = 0
     @Published var sampleRate = 0.0
     @Published var channels = 0
     // Fast-changing readouts live on their own object so their 15 Hz updates
@@ -483,6 +485,10 @@ final class EngineModel: ObservableObject {
     private func refresh() {
         // Only publish on this (whole-sidebar) object when something changed.
         if capturing != engine.isCapturing { capturing = engine.isCapturing }
+        if tapRestarts != engine.tapRestarts {
+            tapRestarts = engine.tapRestarts
+            sampleRate = engine.sampleRate; channels = engine.channels
+        }
         levels.peak = engine.peak
         levels.bass = engine.bass
         levels.mid = engine.mid

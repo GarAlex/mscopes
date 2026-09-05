@@ -13,8 +13,8 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "0.2"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "0.2.1"
+    CURRENT_PROJECT_VERSION: "3"
     DEVELOPMENT_TEAM: "T9Y6669YYQ"          # Alexander Garmash (from your Apple Development cert)
     SWIFT_VERSION: "5.0"
     CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"

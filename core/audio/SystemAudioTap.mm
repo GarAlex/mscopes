@@ -134,6 +134,14 @@ bool SystemAudioTap::start(std::string& err)
     return true;
 }
 
+void SystemAudioTap::pauseForTest()
+{
+    if (_aggID != kAudioObjectUnknown && _procID) {
+        AudioDeviceStop(_aggID, _procID);
+        os_log(tapLog(), "paused for test: IO stopped, objects kept");
+    }
+}
+
 void SystemAudioTap::stop()
 {
     if (_aggID != kAudioObjectUnknown && _procID) {
