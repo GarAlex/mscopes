@@ -9,9 +9,10 @@ Music visualizer plugin ships inside the app.
 
 <p align="center"><img src="docs/media/mscopes-demo.gif" width="720" alt="MScopes demo"></p>
 
-**Download:** [mscopes.com](https://mscopes.com) — a signed, notarized DMG
-(macOS 14.4 or later, Apple silicon and Intel). **Source:** this repository,
-BSD 3-Clause.
+**Download:** the latest signed, notarized DMG is on the
+[Releases page](https://github.com/GarAlex/mscopes/releases/latest)
+(macOS 14.4 or later, Apple silicon and Intel). Home: [mscopes.com](https://mscopes.com).
+**Source:** this repository, BSD 3-Clause.
 
 ## What it does
 
