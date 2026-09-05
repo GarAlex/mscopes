@@ -79,7 +79,9 @@ part of this repository):
 <td><img src="docs/media/classic/yay-mk-ii.jpg" alt="yay mk ii"></td>
 </tr></table>
 
-The app, with its sidebar:
+The app: its own header over the visuals, the sidebar alongside. Widget
+mode (View ▸ Widget Mode) keeps just the visuals in a small always-on-top
+window, and the Dock icon shows a live spectrum while music plays.
 
 <p align="center"><img src="docs/media/app/neon-cathedral.png" width="720" alt="MScopes window"></p>
 
