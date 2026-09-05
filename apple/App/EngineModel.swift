@@ -496,5 +496,6 @@ final class EngineModel: ObservableObject {
         levels.bpm = engine.bpm
         levels.beatLevel = engine.beatLevel
         levels.audioCallbacks = engine.audioCallbacks
+        levels.frames = engine.renderedFrames
     }
 }

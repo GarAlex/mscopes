@@ -10,7 +10,7 @@ namespace viz {
 Analyzer::Analyzer() : _fft(kFFT)
 {
     for (int c = 0; c < kMaxChannels; ++c)
-        _ring[c].assign(kFFT, 0.f);
+        _ring[c].assign(kRing, 0.f);
 
     // Hann window in vDSP's "normalized" flavor (unit RMS: the plain window
     // scaled by sqrt(8/3)), so calibration matches the original Apple build.
@@ -25,29 +25,31 @@ Analyzer::~Analyzer() = default;
 void Analyzer::push(const float* interleaved, int numFrames, int channels)
 {
     if (!interleaved || numFrames <= 0 || channels <= 0) return;
-    std::lock_guard<std::mutex> lock(_mutex);
-    _channels = std::min(channels, kMaxChannels);
+    _channels.store(std::min(channels, kMaxChannels), std::memory_order_relaxed);
+    uint64_t w = _written.load(std::memory_order_relaxed);
     for (int n = 0; n < numFrames; ++n) {
+        int pos = (int)((w + (uint64_t)n) % kRing);
         for (int c = 0; c < kMaxChannels; ++c) {
             int src = (c < channels) ? c : (channels - 1);   // dup last ch if mono
-            _ring[c][_writePos] = interleaved[n * channels + src];
+            _ring[c][pos] = interleaved[n * channels + src];
         }
-        _writePos = (_writePos + 1) % kFFT;
     }
+    _written.store(w + (uint64_t)numFrames, std::memory_order_release);
 }
 
 void Analyzer::analyze(VizFrame& out, double dtOverride)
 {
-    // Snapshot the ring (unwrapped so the oldest sample is first) under lock.
+    // Snapshot the newest kFFT samples (oldest first), lock-free.
     float chan[kMaxChannels][kFFT];
-    int channels, writePos;
+    int channels = _channels.load(std::memory_order_relaxed);
     {
-        std::lock_guard<std::mutex> lock(_mutex);
-        channels = _channels;
-        writePos = _writePos;
+        uint64_t w = _written.load(std::memory_order_acquire);
+        uint64_t start = w >= (uint64_t)kFFT ? w - (uint64_t)kFFT : 0;
         for (int c = 0; c < kMaxChannels; ++c)
-            for (int i = 0; i < kFFT; ++i)
-                chan[c][i] = _ring[c][(writePos + i) % kFFT];
+            for (int i = 0; i < kFFT; ++i) {
+                uint64_t idx = start + (uint64_t)i;
+                chan[c][i] = idx < w ? _ring[c][idx % kRing] : 0.f;
+            }
     }
 
     // dt between analyses feeds the beat detector's tempo clock: wall clock

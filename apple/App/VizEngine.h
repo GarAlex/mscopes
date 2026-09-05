@@ -30,6 +30,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Times the tap was re-opened on its own (callbacks stopped, output device
 /// changed, or the Mac woke) since capture started.
 @property (nonatomic, readonly) NSInteger tapRestarts;
+/// Frames rendered since capture started (the render loop's own counter).
+@property (nonatomic, readonly) unsigned long long renderedFrames;
 
 /// Log-spaced spectrum bands (0..1) of the latest frame, for small meters
 /// such as the live Dock icon. Fills `out[0..count)`; count ≤ 32.

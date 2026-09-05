@@ -42,4 +42,12 @@ app's **Install…** button installs for Music.
 - `kill -USR2 <pid>` stops the audio tap's IO in place (what a device change or
   sleep does to it); the engine's watchdog must re-open it within ~3 s and the
   sidebar shows "reconnected ×1".
+- `~/Library/Logs/MScopes/engine.log` records capture start/stop, every tap
+  re-open and why, device/wake/display events, audio going silent and coming
+  back, and a heartbeat with the counters every 10 s. First place to look when
+  the visuals stop.
+- `MSCOPES_TAP=global` uses CoreAudio's global tap instead of the default
+  mixdown of the playing processes — for comparison only: on macOS 26 the global
+  tap (and a mixdown of every process object) goes silent for seconds to minutes
+  every few minutes while a tap of just the playing processes does not.
 - `MSCOPES_NO_GPU=1` forces every effect's CPU path.

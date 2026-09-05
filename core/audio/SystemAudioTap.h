@@ -9,6 +9,7 @@
 #pragma once
 #include <functional>
 #include <string>
+#include <vector>
 #include <CoreAudio/CoreAudio.h>
 
 namespace viz {
@@ -34,6 +35,20 @@ public:
 
     double sampleRate() const { return _sampleRate; }
     int    channels()   const { return _channels; }
+    AudioObjectID aggregateID() const { return _aggID; }
+    // Number of process objects this tap mixes (0 = global tap mode).
+    int processCount() const { return _processCount; }
+    // The process objects this tap was built from (sorted; empty in global mode).
+    const std::vector<AudioObjectID>& tappedProcesses() const { return _procs; }
+
+    // The process objects currently producing output, minus this process
+    // (sorted) — what a fresh tap would be built from.
+    static std::vector<AudioObjectID> runningOutputProcesses();
+
+    // Call `handler` (on the main queue) whenever the audio process list or
+    // any process's running-output state changes. Installing twice replaces
+    // the handler; an empty handler stops the watching.
+    static void watchProcesses(std::function<void()> handler);
 
 private:
     Callback           _cb;
@@ -43,6 +58,8 @@ private:
     double             _sampleRate = 0;
     int                _channels   = 0;
     bool               _running    = false;
+    int                _processCount = 0;
+    std::vector<AudioObjectID> _procs;
 };
 
 } // namespace viz

@@ -19,6 +19,7 @@ final class LevelsModel: ObservableObject {
     @Published var bpm: Float = 0
     @Published var beatLevel: Float = 0
     @Published var audioCallbacks: UInt64 = 0
+    @Published var frames: UInt64 = 0
 }
 
 struct LevelsView: View {
@@ -65,6 +66,8 @@ struct LevelsView: View {
 struct CallbackCountLabel: View {
     @ObservedObject var levels: LevelsModel
     var body: some View {
-        Text("cbs \(levels.audioCallbacks)").font(.caption2).foregroundStyle(.secondary)
+        Text("cbs \(levels.audioCallbacks) · frames \(levels.frames)")
+            .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+            .help("Audio callbacks and rendered frames since capture started — both should keep climbing. Log: ~/Library/Logs/MScopes/engine.log")
     }
 }

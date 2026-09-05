@@ -204,13 +204,19 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     // device changes, its sample rate changes, or the Mac sleeps. The tick
     // watches the callback counter and re-opens the tap when it stalls; the
     // device-change and wake listeners do it eagerly.
+    std::atomic<float>    _inPeak;         // raw tap input level (pre-analysis)
     unsigned long long    _cbsSeen;
     CFTimeInterval        _cbsSeenAt;
     CFTimeInterval        _lastTapRestart;
     NSInteger             _tapRestarts;
+    NSInteger             _linkRestarts;
+    unsigned long long    _frames;         // ticks rendered since capture started
+    NSTimer*              _supervisor;     // 1 Hz: display-link watchdog + heartbeat
+    id                    _screenObserver;
     BOOL                  _listenersInstalled;
     id                    _wakeObserver;
     AudioObjectPropertyListenerBlock _defaultDeviceListener;
+    unsigned              _procGen;        // coalesces bursts of process events
     // Frame pacing: a CVDisplayLink fires on its own thread exactly at vsync
     // and hands the tick to the (idle) main thread. The AppKit-integrated
     // NSView displayLink was tried first and measured: it is delivered inside
@@ -489,16 +495,44 @@ static os_log_t wvEngineLog(void)
     return l;
 }
 
+// A plain log file next to the system ones (~/Library/Logs/MScopes/engine.log):
+// capture start/stop, tap re-opens and why, display-link restarts, and a
+// heartbeat every 10 s with the counters — so a freeze that happened while
+// nobody was looking can still be explained afterwards. Truncated at 2 MB.
+static void wvLog(const char* fmt, ...)
+{
+    static FILE* f = nullptr;
+    if (!f) {
+        NSString* dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/MScopes"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString* path = [dir stringByAppendingPathComponent:@"engine.log"];
+        NSDictionary* attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+        f = fopen(path.fileSystemRepresentation, ([attrs fileSize] > 2 * 1024 * 1024) ? "w" : "a");
+        if (!f) return;
+        setvbuf(f, nullptr, _IOLBF, 0);
+    }
+    char ts[32];
+    time_t t = time(nullptr);
+    strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", localtime(&t));
+    fprintf(f, "%s ", ts);
+    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+    fputc('\n', f);
+}
+
 /// Create and start a fresh tap (the previous one, if any, is torn down).
 - (BOOL)openTap:(std::string&)err
 {
     if (_tap) { _tap->stop(); delete _tap; _tap = nullptr; }
     viz::Analyzer* an = &_analyzer;
     std::atomic<unsigned long long>* cbs = &_cbs;
+    std::atomic<float>* inPeak = &_inPeak;
     _tap = new viz::SystemAudioTap(
-        [an, cbs](const float* interleaved, int frames, int channels, double sr) {
+        [an, cbs, inPeak](const float* interleaved, int frames, int channels, double sr) {
             (void)sr;
             an->push(interleaved, frames, channels);
+            float m = 0.f;
+            for (int i = 0, n = frames * channels; i < n; ++i) m = std::max(m, std::fabs(interleaved[i]));
+            inPeak->store(std::max(m, inPeak->load() * 0.9f));   // raw input level, decays
             cbs->fetch_add(1);
         });
     if (!_tap->start(err)) {
@@ -509,12 +543,15 @@ static os_log_t wvEngineLog(void)
     _channels   = _tap->channels();
     _cbsSeen    = _cbs.load();
     _cbsSeenAt  = CACurrentMediaTime();
+    wvLog("tap opened: %.0f Hz, %d ch, %s (cbs=%llu)", _sampleRate, _channels,
+          _tap->processCount() ? [NSString stringWithFormat:@"mixdown of %d playing process(es)", _tap->processCount()].UTF8String : "global (none playing)",
+          _cbs.load());
     return YES;
 }
 
 - (void)debugStallTap
 {
-    if (_tap) { _tap->pauseForTest(); fprintf(stderr, "[VizEngine] SIGUSR2: tap IO stopped for the watchdog test\n"); }
+    if (_tap) { _tap->pauseForTest(); wvLog("SIGUSR2: tap IO stopped for the watchdog test"); fprintf(stderr, "[VizEngine] SIGUSR2: tap IO stopped for the watchdog test\n"); }
 }
 
 /// Re-open the tap in place. Main thread only. A failure is logged and left
@@ -523,6 +560,7 @@ static os_log_t wvEngineLog(void)
 {
     if (!_capturing) return;
     _lastTapRestart = CACurrentMediaTime();
+    wvLog("tap re-open requested: %s (cbs=%llu, frames=%llu)", why, _cbs.load(), _frames);
     std::string err;
     if ([self openTap:err]) {
         _tapRestarts++;
@@ -531,6 +569,7 @@ static os_log_t wvEngineLog(void)
         fprintf(stderr, "[VizEngine] tap re-opened (%s): %.0f Hz, %d ch\n", why, _sampleRate, _channels);
     } else {
         os_log_error(wvEngineLog(), "tap re-open failed (%{public}s): %{public}s", why, err.c_str());
+        wvLog("tap re-open FAILED (%s): %s", why, err.c_str());
         fprintf(stderr, "[VizEngine] tap re-open failed (%s): %s\n", why, err.c_str());
         _cbsSeenAt = CACurrentMediaTime();   // back off; the watchdog retries
     }
@@ -552,15 +591,42 @@ static os_log_t wvEngineLog(void)
         kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     __weak VizEngine* weakSelf = self;
     _defaultDeviceListener = ^(UInt32, const AudioObjectPropertyAddress*) {
+        wvLog("event: default output device changed");
         [weakSelf scheduleTapRestartAfter:0.6 because:"default output device changed"];
     };
     AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &addr,
                                         dispatch_get_main_queue(), _defaultDeviceListener);
+    // The set of playing processes changed (an app started or stopped
+    // playing, appeared, or quit): the tap only mixes the processes it was
+    // built from, so rebuild it when the set really differs. Events come in
+    // bursts; only the last one of a burst acts.
+    viz::SystemAudioTap::watchProcesses([weakSelf] {
+        VizEngine* me = weakSelf; if (!me) return;
+        unsigned gen = ++me->_procGen;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            VizEngine* me2 = weakSelf; if (!me2 || gen != me2->_procGen || !me2->_capturing || !me2->_tap) return;
+            auto now = viz::SystemAudioTap::runningOutputProcesses();
+            if (now != me2->_tap->tappedProcesses()) {
+                wvLog("event: playing processes changed (%zu -> %zu)", me2->_tap->tappedProcesses().size(), now.size());
+                [me2 restartTapBecause:"playing processes changed"];
+            }
+        });
+    });
     // Sleep/wake: the aggregate device rarely survives it.
     _wakeObserver = [[NSWorkspace sharedWorkspace].notificationCenter
         addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:[NSOperationQueue mainQueue]
         usingBlock:^(NSNotification*) {
+            wvLog("event: the Mac woke");
             [weakSelf scheduleTapRestartAfter:1.5 because:"the Mac woke"];
+        }];
+    // Displays changed (one slept, was unplugged, changed mode): the
+    // CVDisplayLink may keep running or may not — rebuild it to be sure.
+    _screenObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil
+        queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification*) {
+            wvLog("event: screen parameters changed");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [weakSelf restartDisplayLinkBecause:"screen parameters changed"]; });
         }];
 }
 
@@ -574,13 +640,122 @@ static os_log_t wvEngineLog(void)
     AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &addr,
                                            dispatch_get_main_queue(), _defaultDeviceListener);
     _defaultDeviceListener = nil;
+    viz::SystemAudioTap::watchProcesses(nullptr);
     if (_wakeObserver) {
         [[NSWorkspace sharedWorkspace].notificationCenter removeObserver:_wakeObserver];
         _wakeObserver = nil;
     }
+    if (_screenObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:_screenObserver];
+        _screenObserver = nil;
+    }
+}
+
+// Sample rate of the default output device and of our aggregate, for the
+// log: Apple Music switches the output device's rate per track (44.1/48/96 k
+// for lossless), and a tap can go quiet while CoreAudio reconfigures.
+static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
+{
+    *deviceRate = 0; *aggRate = 0;
+    AudioObjectID dev = kAudioObjectUnknown; UInt32 sz = sizeof(dev);
+    AudioObjectPropertyAddress defAddr = { kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectPropertyAddress rateAddr = { kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &defAddr, 0, nullptr, &sz, &dev) == noErr) {
+        Float64 r = 0; sz = sizeof(r);
+        if (AudioObjectGetPropertyData(dev, &rateAddr, 0, nullptr, &sz, &r) == noErr) *deviceRate = r;
+    }
+    if (agg != kAudioObjectUnknown) {
+        Float64 r = 0; sz = sizeof(r);
+        if (AudioObjectGetPropertyData(agg, &rateAddr, 0, nullptr, &sz, &r) == noErr) *aggRate = r;
+    }
+}
+
+// MARK: - render loop supervision
+
+- (void)startDisplayLink
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"   // CVDisplayLink: see ivar note
+    if (CVDisplayLinkCreateWithActiveCGDisplays(&_cvLink) == kCVReturnSuccess) {
+        CVDisplayLinkSetOutputCallback(_cvLink, wvDisplayLinkFired, (__bridge void*)self);
+        CVDisplayLinkStart(_cvLink);
+    } else {
+        fprintf(stderr, "[VizEngine] CVDisplayLink unavailable; falling back to a 60 Hz timer\n");
+        wvLog("CVDisplayLink unavailable; 60 Hz timer fallback");
+        NSTimer* t = [NSTimer timerWithTimeInterval:1.0/60.0 target:self
+                                           selector:@selector(tick:) userInfo:nil repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+        _fallbackTimer = t;
+    }
+#pragma clang diagnostic pop
+}
+
+- (void)stopDisplayLink
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (_cvLink) { CVDisplayLinkStop(_cvLink); CVDisplayLinkRelease(_cvLink); _cvLink = nullptr; }
+#pragma clang diagnostic pop
+    [_fallbackTimer invalidate]; _fallbackTimer = nil;
+}
+
+- (void)restartDisplayLinkBecause:(const char*)why
+{
+    if (!_capturing) return;
+    [self stopDisplayLink];
+    [self startDisplayLink];
+    _linkRestarts++;
+    _lastTick = CACurrentMediaTime();
+    wvLog("display link rebuilt (%s), restart #%ld", why, (long)_linkRestarts);
+    fprintf(stderr, "[VizEngine] display link rebuilt (%s)\n", why);
+}
+
+/// Once a second: rebuild the display link if ticks stopped, and write the
+/// heartbeat every 10 s.
+- (void)supervise
+{
+    if (!_capturing) return;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (_lastTick > 0 && now - _lastTick > 2.0)
+        [self restartDisplayLinkBecause:"no render ticks for 2 s"];
+    // Audio going silent while callbacks keep coming is the other way the
+    // visuals can stop; note when it starts and ends (with the counters).
+    static int quiet = 0; static bool wasSilent = false; static CFTimeInterval silentSince = 0;
+    if (_peak < 0.002f) {
+        // Safety net for the macOS 26 tap dropouts: silence from the tap
+        // while some process still reports it is playing means the tap
+        // died, not the music — a fresh tap comes back immediately.
+        if (quiet >= 3 && (quiet % 3) == 0 && now - _lastTapRestart > 8.0 && _capturing
+            && !viz::SystemAudioTap::runningOutputProcesses().empty())
+            [self restartTapBecause:"tap silent while an app is playing"];
+        if (++quiet == 2 && !wasSilent) {
+            wasSilent = true; silentSince = now;
+            double dr, ar; wvRates(&dr, &ar, _tap ? _tap->aggregateID() : kAudioObjectUnknown);
+            wvLog("audio silent (cbs=%llu frames=%llu bpm=%.0f input peak %.4f) device %.0f Hz, aggregate %.0f Hz",
+                  _cbs.load(), _frames, _bpm, _inPeak.load(), dr, ar);
+        }
+    } else {
+        quiet = 0;
+        if (wasSilent) {
+            wasSilent = false;
+            double dr, ar; wvRates(&dr, &ar, _tap ? _tap->aggregateID() : kAudioObjectUnknown);
+            wvLog("audio back after %.0f s (cbs=%llu frames=%llu) device %.0f Hz, aggregate %.0f Hz",
+                  now - silentSince, _cbs.load(), _frames, dr, ar);
+        }
+    }
+    static int n = 0;
+    if ((++n % 10) == 0)
+    {
+        double dr, ar; wvRates(&dr, &ar, _tap ? _tap->aggregateID() : kAudioObjectUnknown);
+        wvLog("heartbeat: cbs=%llu frames=%llu peak=%.3f in=%.3f bpm=%.0f tapRestarts=%ld linkRestarts=%ld device %.0f Hz agg %.0f Hz",
+              _cbs.load(), _frames, _peak, _inPeak.load(), _bpm, (long)_tapRestarts, (long)_linkRestarts, dr, ar);
+    }
 }
 
 - (NSInteger)tapRestarts { return _tapRestarts; }
+- (unsigned long long)renderedFrames { return _frames; }
 
 - (BOOL)start:(NSError **)error
 {
@@ -599,24 +774,20 @@ static os_log_t wvEngineLog(void)
 
     _capturing   = YES;
     _tapRestarts = 0;
+    _linkRestarts = 0;
+    _frames = 0;
     [self installTapListeners];
     fprintf(stderr, "[VizEngine] capturing: %.0f Hz, %d ch\n", _sampleRate, _channels);
+    NSString* ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    wvLog("capture started: %.0f Hz, %d ch, app %s", _sampleRate, _channels, ver ? ver.UTF8String : "?");
 
     _lastTick = 0;
     _tickPending = false;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"   // CVDisplayLink: see ivar note
-    if (CVDisplayLinkCreateWithActiveCGDisplays(&_cvLink) == kCVReturnSuccess) {
-        CVDisplayLinkSetOutputCallback(_cvLink, wvDisplayLinkFired, (__bridge void*)self);
-        CVDisplayLinkStart(_cvLink);
-    } else {
-        fprintf(stderr, "[VizEngine] CVDisplayLink unavailable; falling back to a 60 Hz timer\n");
-        NSTimer* t = [NSTimer timerWithTimeInterval:1.0/60.0 target:self
-                                           selector:@selector(tick:) userInfo:nil repeats:YES];
-        [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
-        _fallbackTimer = t;
-    }
-#pragma clang diagnostic pop
+    [self startDisplayLink];
+    _supervisor = [NSTimer timerWithTimeInterval:1.0 target:self selector:@selector(supervise)
+                                        userInfo:nil repeats:YES];
+    _supervisor.tolerance = 0.2;
+    [[NSRunLoop mainRunLoop] addTimer:_supervisor forMode:NSRunLoopCommonModes];
     return YES;
 }
 
@@ -650,12 +821,10 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
 
 - (void)stop
 {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    if (_cvLink) { CVDisplayLinkStop(_cvLink); CVDisplayLinkRelease(_cvLink); _cvLink = nullptr; }
-#pragma clang diagnostic pop
-    [_fallbackTimer invalidate]; _fallbackTimer = nil;
+    [_supervisor invalidate]; _supervisor = nil;
+    [self stopDisplayLink];
     [self removeTapListeners];
+    if (_capturing) wvLog("capture stopped (cbs=%llu frames=%llu)", _cbs.load(), _frames);
     if (_tap) { _tap->stop(); delete _tap; _tap = nullptr; }
     _capturing = NO;
 }
@@ -677,6 +846,7 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     }
     double dt = _lastTick > 0 ? now - _lastTick : 1.0 / 60.0;
     _lastTick = now;
+    _frames++;
     _fxCtx.dt = std::max(1.0 / 240.0, std::min(1.0 / 20.0, dt));
 
     // Adapt the internal render resolution to the view: half the backing pixel

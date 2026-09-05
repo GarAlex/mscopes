@@ -4,7 +4,8 @@
 // Standalone-only: the Music plugin gets a spectrum from Music already, but for
 // arbitrary system audio we must run our own FFT. Thread model: the audio
 // callback calls push() (real-time thread); a timer on the main thread calls
-// analyze() to produce a frame. A mutex guards the shared sample ring.
+// analyze() to produce a frame. The sample ring is lock-free (single
+// producer, single consumer): the audio thread never blocks.
 // Portable C++: the FFT comes from platform/fft.h (vDSP on Apple, our own
 // radix-2 elsewhere).
 //
@@ -12,8 +13,8 @@
 #include "VizFrame.h"
 #include "BeatDetector.h"
 #include "../platform/fft.h"
+#include <atomic>
 #include <chrono>
-#include <mutex>
 #include <vector>
 #include <cstdint>
 
@@ -46,10 +47,14 @@ public:
 private:
     platform::RealFft _fft;
 
-    std::mutex _mutex;
-    std::vector<float> _ring[kMaxChannels];      // last kFFT samples per channel
-    int _writePos = 0;
-    int _channels = 2;
+    // Ring of the last kRing samples per channel. push() writes, then publishes
+    // the total frame count (release); analyze() reads the count (acquire) and
+    // copies the newest kFFT samples. The writer would have to lap by
+    // kRing - kFFT frames (~150 ms) during a microsecond copy to tear it.
+    static constexpr int kRing = 8192;
+    std::vector<float> _ring[kMaxChannels];
+    std::atomic<uint64_t> _written{0};
+    std::atomic<int> _channels{2};
     uint64_t _frameIndex = 0;
 
     std::vector<float> _window;                  // normalized Hann window (kFFT)
