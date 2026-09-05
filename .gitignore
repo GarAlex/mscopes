@@ -1,0 +1,18 @@
+build/
+.DS_Store
+*.o
+*.dSYM/
+
+# Preset content that is local-only: the community archive
+# (tools/fetch-presets.sh + tools/sort-presets.py) and the Nullsoft-era
+# classic set are for testing on this machine — never tracked, never bundled.
+# The repo's own fixtures live in presets/tests/ (tools/make-test-presets.py).
+presets/extracted/
+presets/failed/
+presets/classic/
+
+# XcodeGen: project.yml is source of truth; the .xcodeproj is generated
+apple/*.xcodeproj/
+**/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/

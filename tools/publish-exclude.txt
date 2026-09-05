@@ -1,0 +1,6 @@
+# Paths (relative to the repo root, git-archive style: files or whole
+# directories) that never go into the public snapshot tools/publish.sh
+# builds. Lines starting with # are comments. Everything untracked or
+# gitignored is already excluded because the snapshot is taken from HEAD's
+# tree, not the working directory.
+core/effects/PORTING.md

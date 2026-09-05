@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  engine:
+    name: engine (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    # The engine is written to build anywhere, but only macOS is verified so
+    # far: the Linux leg is advisory until it has been seen green.
+    continue-on-error: ${{ matrix.os == 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/cmake --parallel
+      - name: Self-tests
+        # No GPU on a hosted runner: every effect runs its CPU path.
+        run: ctest --test-dir build/cmake --output-on-failure
+        env:
+          MSCOPES_NO_GPU: "1"
+
+  app:
+    name: macOS app + Music plugin (unsigned)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: cd apple && xcodegen generate
+      - name: Build
+        run: >
+          xcodebuild -project apple/MScopes.xcodeproj -scheme App -configuration Debug
+          -destination 'generic/platform=macOS' -derivedDataPath build/DerivedData
+          CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+          DEVELOPMENT_TEAM="" build | tail -40; test "${PIPESTATUS[0]}" -eq 0
+        shell: bash

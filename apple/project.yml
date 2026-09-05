@@ -1,0 +1,137 @@
+# One XcodeGen project for everything Apple: the shared engine as a static
+# library, the macOS app, and the Music visual plugin. Regenerate with
+#   cd apple && xcodegen generate
+# The engine's own (cross-platform) build is the CMakeLists.txt at the repo
+# root; this project consumes the same core/ sources directly.
+name: MScopes
+
+options:
+  bundleIdPrefix: com.writea
+  deploymentTarget:
+    macOS: "11.0"                          # engine + plugin floor; the app overrides
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: "T9Y6669YYQ"          # Alexander Garmash (from your Apple Development cert)
+    SWIFT_VERSION: "5.0"
+    CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+    CLANG_CXX_LIBRARY: "libc++"
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "Apple Development"
+    HEADER_SEARCH_PATHS:
+      - $(SRCROOT)/../core
+      - $(SRCROOT)/../core/effects
+      - $(SRCROOT)/../core/script
+      - $(SRCROOT)/../core/preset
+      - $(SRCROOT)/../core/audio
+      - $(SRCROOT)/../core/gpu
+      - $(SRCROOT)/../core/platform
+  configs:
+    Debug:
+      # The CPU effect core is far too slow at -O0 (drops below 60fps).
+      # Optimize C/C++/ObjC++ even in Debug; Swift stays at -Onone.
+      GCC_OPTIMIZATION_LEVEL: 2
+
+targets:
+  # --- the engine: core/ minus the tests, tools and non-Apple backends -----
+  VizCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: ../core
+        name: core
+        excludes:
+          - "tests"
+          - "tools"
+          - "platform/fft.cpp"              # vDSP (fft.mm) on Apple
+          - "gpu/GpuFxStub.cpp"             # Metal (gpu/metal/) on Apple
+          - "**/*.md"
+    settings:
+      base:
+        PRODUCT_NAME: VizCore
+        CLANG_ENABLE_OBJC_ARC: YES
+        SKIP_INSTALL: YES
+        ARCHS: "arm64 x86_64"               # universal: the plugin links both slices
+      configs:
+        Debug:
+          ONLY_ACTIVE_ARCH: NO              # XcodeGen's Debug preset says YES; not here
+
+  # --- the macOS app -------------------------------------------------------
+  App:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.4"                # CoreAudio process tap, NSView displayLink
+    sources:
+      - path: App
+    dependencies:
+      - target: VizCore
+      - target: MusicPlugin                 # shipped inside the app: Contents/PlugIns
+        link: false
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+      - sdk: Accelerate.framework
+      - sdk: CoreAudio.framework
+      - sdk: AudioToolbox.framework
+      - sdk: QuartzCore.framework
+      - sdk: Metal.framework
+      - sdk: CoreVideo.framework
+    settings:
+      base:
+        PRODUCT_NAME: MScopes
+        PRODUCT_BUNDLE_IDENTIFIER: com.writea.viz
+        INFOPLIST_FILE: App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: App/MScopes-Bridging-Header.h
+        CLANG_ENABLE_OBJC_ARC: YES
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/App
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: App/MScopes.entitlements
+
+  # --- the Music visual plugin (loaded into Music's process; universal) ----
+  MusicPlugin:
+    type: bundle
+    platform: macOS
+    sources:
+      - path: MusicPlugin
+        excludes:
+          - "smoketest.mm"                  # a host harness with its own main()
+          - "*.sh"
+          - "*.md"
+          - "PkgInfo"
+      - path: ../third_party/itunes-visual-sdk/iTunesAPI.cpp
+        name: iTunesAPI.cpp
+    dependencies:
+      - target: VizCore
+        link: true                          # bundles don't link static libs by default
+      - sdk: Cocoa.framework
+      - sdk: QuartzCore.framework
+      - sdk: Carbon.framework
+      - sdk: CoreServices.framework
+      - sdk: CoreAudio.framework
+      - sdk: Metal.framework
+      - sdk: Accelerate.framework
+    settings:
+      base:
+        PRODUCT_NAME: MScopesPlugin        # must match CFBundleExecutable in Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.writea.viz.musicplugin
+        INFOPLIST_FILE: MusicPlugin/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        WRAPPER_EXTENSION: bundle
+        CLANG_ENABLE_OBJC_ARC: NO           # the plugin manages its retains by hand
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES     # -fvisibility=hidden; the entry point opts in
+        ENABLE_HARDENED_RUNTIME: YES        # notarization wants every executable hardened
+        ARCHS: "arm64 x86_64"               # Music's visualizer host may be the Intel helper
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/MusicPlugin
+          - $(SRCROOT)/../third_party/itunes-visual-sdk
+      configs:
+        Debug:
+          ONLY_ACTIVE_ARCH: NO

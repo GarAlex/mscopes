@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>MScopesPlugin</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.writea.viz.musicplugin</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>MScopes</string>
+	<key>CFBundlePackageType</key>
+	<string>hvpl</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleSignature</key>
+	<string>WVsp</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>MScopes — MIT licensed. iTunes Visual SDK © Apple Inc.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
