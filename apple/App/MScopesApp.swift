@@ -14,7 +14,7 @@ struct MScopesApp: App {
             ContentView()
                 .environmentObject(model)
         }
-        .windowStyle(.titleBar)
+        .windowStyle(.hiddenTitleBar)   // our HeaderBar replaces it; see WindowChrome.swift
         .defaultSize(width: 940, height: 560)
         .commands { PresetCommands(model: model) }
 
@@ -26,12 +26,20 @@ struct MScopesApp: App {
     }
 }
 
-/// "Presets" menu: the browser window and a random-next shortcut.
+/// "Presets" menu: the browser window and a random-next shortcut; View menu
+/// items for the sidebar and widget mode.
 struct PresetCommands: Commands {
-    let model: EngineModel
+    @ObservedObject var model: EngineModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        CommandGroup(after: .sidebar) {
+            Button(model.showSidebar ? "Hide Sidebar" : "Show Sidebar") { model.showSidebar.toggle() }
+                .keyboardShortcut("s", modifiers: [.control, .command])
+                .disabled(model.widgetMode)
+            Button(model.widgetMode ? "Leave Widget Mode" : "Widget Mode") { model.widgetMode.toggle() }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
+        }
         CommandMenu("Presets") {
             Button("Preset Browser…") { openWindow(id: PresetBrowserView.windowID) }
                 .keyboardShortcut("b", modifiers: .command)

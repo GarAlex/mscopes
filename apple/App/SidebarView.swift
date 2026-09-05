@@ -8,22 +8,10 @@ import SwiftUI
 
 struct SidebarView: View {
     @EnvironmentObject var model: EngineModel
-    let onFullscreen: () -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Text("MScopes").font(.title2).bold()
-                    Spacer()
-                    Button {
-                        onFullscreen()
-                    } label: {
-                        Label("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right")
-                    }
-                    .help("Fullscreen visuals without controls — press Esc to come back")
-                }
-
                 AudioSection()
                 MusicPluginSection()
                 LevelsView(levels: model.levels)

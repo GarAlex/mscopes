@@ -41,8 +41,22 @@ final class EngineModel: ObservableObject {
         didSet {
             guard currentPreset != engine.currentPreset else { return }
             engine.currentPreset = currentPreset
+            currentPresetTitle = presetNames.first { $0.id == currentPreset }?.name ?? ""
             syncEffects()
         }
+    }
+    /// What the header shows: the built-in preset's name, or the file name of
+    /// the loaded .avs/.json (album tracks included).
+    @Published var currentPresetTitle: String = ""
+
+    // Window layout, remembered across launches (the AppKit side is in
+    // WindowChrome.swift).
+    @Published var showSidebar: Bool = UserDefaults.standard.object(forKey: "showSidebar") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(showSidebar, forKey: "showSidebar") }
+    }
+    /// Widget mode: a small always-on-top window with just the visuals.
+    @Published var widgetMode: Bool = UserDefaults.standard.bool(forKey: "widgetMode") {
+        didSet { UserDefaults.standard.set(widgetMode, forKey: "widgetMode") }
     }
 
     private var poll: Timer?
@@ -54,6 +68,7 @@ final class EngineModel: ObservableObject {
                                modern: p.count > 1 && p[1] == "1")
         }
         currentPreset = Int(engine.currentPreset)
+        currentPresetTitle = presetNames.first { $0.id == currentPreset }?.name ?? ""
         syncEffects()
 
         albumRootPath = UserDefaults.standard.string(forKey: "albumRootPath")
@@ -92,6 +107,7 @@ final class EngineModel: ObservableObject {
         } else {
             avsLoadReport = engine.loadAvsPreset(atPath: url.path)
         }
+        currentPresetTitle = url.deletingPathExtension().lastPathComponent
         syncEffects()
     }
 
@@ -240,6 +256,7 @@ final class EngineModel: ObservableObject {
         currentAlbum = album
         currentTrackIndex = 0
         avsLoadReport = engine.loadAlbumTrack(atPath: album.tracks[0].url.path, isFirst: true)
+        currentPresetTitle = albumTrackTitle(album, 0)
         syncEffects()
     }
 
@@ -248,6 +265,7 @@ final class EngineModel: ObservableObject {
         currentTrackIndex += 1
         avsLoadReport = engine.loadAlbumTrack(
             atPath: album.tracks[currentTrackIndex].url.path, isFirst: false)
+        currentPresetTitle = albumTrackTitle(album, currentTrackIndex)
         syncEffects()
     }
 
@@ -256,7 +274,12 @@ final class EngineModel: ObservableObject {
         currentTrackIndex -= 1
         avsLoadReport = engine.loadAlbumTrack(
             atPath: album.tracks[currentTrackIndex].url.path, isFirst: false)
+        currentPresetTitle = albumTrackTitle(album, currentTrackIndex)
         syncEffects()
+    }
+
+    private func albumTrackTitle(_ album: AlbumEntry, _ i: Int) -> String {
+        "\(album.name) · \(album.tracks[i].url.deletingPathExtension().lastPathComponent)"
     }
 
     @Published var albumAutoAdvance = false { didSet { restartAlbumAutoAdvance() } }
