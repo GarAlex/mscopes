@@ -63,3 +63,14 @@ packages, and prints the notarize/staple commands to run afterwards.
   with it.
 - Gatekeeper's `spctl --assess` reports "rejected" for a Developer ID app
   until it is notarized — expected, not a signing failure.
+
+## Publishing a release
+
+`tools/release.sh` leaves two identical images in `build/release/`:
+`MScopes-<version>.dmg` and `MScopes.dmg`. Create the GitHub release
+(tag `v<version>`) and attach **both**. The website and the README link the
+constant name through GitHub's permanent redirect,
+`https://github.com/GarAlex/mscopes/releases/latest/download/MScopes.dmg`,
+so nothing outside the repository changes from release to release. Bump
+`MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in `apple/project.yml`
+first; the DMG takes its name from them.

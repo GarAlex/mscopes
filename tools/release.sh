@@ -65,10 +65,18 @@ if [[ $notarized -eq 1 ]]; then
     xcrun stapler staple "$DMG"
 fi
 
+# The same image under a constant name, for GitHub's permanent
+# releases/latest/download/MScopes.dmg link (used by the website). Upload
+# both files to the release: the versioned one for the record, this one for
+# the link. Renaming does not disturb the signature or the stapled ticket.
+LATEST="$OUT/MScopes.dmg"
+cp "$DMG" "$LATEST"
+
 echo "== 5/5  Gatekeeper check =="
 spctl --assess --type execute --verbose=2 "$APP" 2>&1 | sed 's/^/   /' || true
 echo
 echo "   $DMG"
+echo "   $LATEST   (upload both; the site links releases/latest/download/MScopes.dmg)"
 if [[ $notarized -eq 0 ]]; then
     cat <<MSG
    Not notarized yet. After storing credentials, run:
