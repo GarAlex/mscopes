@@ -11,7 +11,7 @@ final class EngineModel: ObservableObject {
     let engine = VizEngine()
 
     // Live status (refreshed by a display-linked timer).
-    @Published var capturing = false
+    @Published var capturing = false { didSet { if capturing != oldValue { syncDockTile() } } }
     @Published var sampleRate = 0.0
     @Published var channels = 0
     // Fast-changing readouts live on their own object so their 15 Hz updates
@@ -57,6 +57,14 @@ final class EngineModel: ObservableObject {
     /// Widget mode: a small always-on-top window with just the visuals.
     @Published var widgetMode: Bool = UserDefaults.standard.bool(forKey: "widgetMode") {
         didSet { UserDefaults.standard.set(widgetMode, forKey: "widgetMode") }
+    }
+    /// Live Dock icon: a small spectrum with beat flashes and BPM while capturing.
+    @Published var liveDockIcon: Bool = UserDefaults.standard.object(forKey: "liveDockIcon") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(liveDockIcon, forKey: "liveDockIcon"); syncDockTile() }
+    }
+    private lazy var dockTile = DockTileController(engine: engine)
+    private func syncDockTile() {
+        if liveDockIcon && capturing { dockTile.start() } else { dockTile.stop() }
     }
 
     private var poll: Timer?

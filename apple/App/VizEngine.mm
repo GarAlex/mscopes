@@ -215,6 +215,7 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     BOOL   _capturing;
     float  _peak, _bass, _mid, _treble;
     float  _bpm, _beatLevel;
+    float  _bands[32];                  // log-spaced bands of the latest frame
 }
 
 - (instancetype)init
@@ -265,6 +266,13 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
 - (float)treble        { return _treble; }
 - (float)bpm           { return _bpm; }
 - (float)beatLevel     { return _beatLevel; }
+- (void)copyBands:(float *)out count:(NSInteger)count
+{
+    // Resample our 32 fixed bands onto the caller's count (nearest).
+    count = std::max<NSInteger>(1, std::min<NSInteger>(32, count));
+    for (NSInteger i = 0; i < count; ++i)
+        out[i] = _bands[(i * 32) / count];
+}
 - (unsigned long long)audioCallbacks { return _cbs.load(); }
 
 - (void)setShowHUD:(BOOL)showHUD { _showHUD = showHUD; _view->showHUD = showHUD; }
@@ -580,6 +588,17 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     }
 
     _peak = f.peakSpectrum(); _bass = f.bass; _mid = f.mid; _treble = f.treble;
+    {   // 32 log-spaced bands over bins 1..kSpectrumBins for small meters
+        const float lo = 1.f, hi = (float)viz::kSpectrumBins;
+        for (int b = 0; b < 32; ++b) {
+            int i0 = (int)(lo * std::pow(hi / lo, b / 32.f));
+            int i1 = (int)(lo * std::pow(hi / lo, (b + 1) / 32.f));
+            if (i1 <= i0) i1 = i0 + 1;
+            float m = 0.f;
+            for (int i = i0; i < i1 && i < viz::kSpectrumBins; ++i) m = std::max(m, f.spectrum[0][i]);
+            _bands[b] = std::min(1.f, m);
+        }
+    }
     _view->frame = f;
 
     // Run the effect stack on the analyzed frame.

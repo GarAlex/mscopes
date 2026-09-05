@@ -73,6 +73,8 @@ struct ControlsSection: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 Toggle("In-view HUD", isOn: $model.showHUD).font(.caption)
+                Toggle("Live Dock icon", isOn: $model.liveDockIcon).font(.caption)
+                    .help("Show a small spectrum, beat flashes and BPM in the Dock while capturing")
             }
         }
     }

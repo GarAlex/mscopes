@@ -28,6 +28,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) float beatLevel; // 1 on a detected beat, decays to 0
 @property (nonatomic, readonly) unsigned long long audioCallbacks;
 
+/// Log-spaced spectrum bands (0..1) of the latest frame, for small meters
+/// such as the live Dock icon. Fills `out[0..count)`; count ≤ 32.
+- (void)copyBands:(float *)out count:(NSInteger)count;
+
 /// User-adjustable (demonstrates the SwiftUI → core control path).
 @property (nonatomic) float sensitivity;         // 0.25 .. 4.0, default 1.0
 @property (nonatomic) BOOL showHUD;              // in-view diagnostic overlay
