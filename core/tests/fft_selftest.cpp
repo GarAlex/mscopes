@@ -6,6 +6,7 @@
 //
 #include "../platform/fft.h"
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 #ifdef __APPLE__

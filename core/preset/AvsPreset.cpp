@@ -18,6 +18,7 @@
 #include <set>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace viz {

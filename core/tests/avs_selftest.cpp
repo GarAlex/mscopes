@@ -12,6 +12,7 @@
 #include "AvsPreset.h"
 #include "JsonPreset.h"
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>

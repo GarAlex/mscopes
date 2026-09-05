@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'ci/**']
   pull_request:
 
 jobs:
@@ -11,17 +11,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04]
+        os: [macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    # The engine is written to build anywhere, but only macOS is verified so
-    # far: the Linux leg is advisory until it has been seen green.
-    continue-on-error: ${{ matrix.os == 'ubuntu-24.04' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        run: cmake --build build/cmake --parallel
+        shell: bash
+        # Compiler errors are surfaced as annotations so they show on the run
+        # summary without opening the log.
+        run: |
+          set -o pipefail
+          if ! cmake --build build/cmake --parallel 2>&1 | tee build/build.log; then
+            grep -E -m 20 "error|Error" build/build.log | sed 's/^/::error::/'
+            exit 1
+          fi
       - name: Self-tests
         # No GPU on a hosted runner: every effect runs its CPU path.
         run: ctest --test-dir build/cmake --output-on-failure
@@ -30,17 +35,28 @@ jobs:
 
   app:
     name: macOS app + Music plugin (unsigned)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          brew install xcodegen
+          xcodebuild -version
+          xcodegen --version
       - name: Generate project
         run: cd apple && xcodegen generate
       - name: Build
-        run: >
-          xcodebuild -project apple/MScopes.xcodeproj -scheme App -configuration Debug
-          -destination 'generic/platform=macOS' -derivedDataPath build/DerivedData
-          CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
-          DEVELOPMENT_TEAM="" build | tail -40; test "${PIPESTATUS[0]}" -eq 0
         shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build
+          if ! xcodebuild -project apple/MScopes.xcodeproj -scheme App -configuration Debug \
+                 -destination 'generic/platform=macOS' -derivedDataPath build/DerivedData \
+                 CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+                 DEVELOPMENT_TEAM="" build 2>&1 | tee build/xcodebuild.log | grep -E "error:|warning: |BUILD|\\*\\*"; then
+            echo "::group::xcodebuild tail"; tail -60 build/xcodebuild.log; echo "::endgroup::"
+            grep -E -m 20 "error:|error " build/xcodebuild.log | sed 's/^/::error::/'
+            tail -3 build/xcodebuild.log | sed 's/^/::error::/'
+            exit 1
+          fi
+          ls build/DerivedData/Build/Products/Debug/MScopes.app/Contents/PlugIns

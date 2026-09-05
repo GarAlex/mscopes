@@ -12,6 +12,7 @@
 //
 #pragma once
 #include "Framebuffer.h"
+#include <string>
 
 namespace viz { namespace gpu {
 

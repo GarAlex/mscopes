@@ -5,6 +5,8 @@
 #include "GpuFx.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 namespace viz {
 

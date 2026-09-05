@@ -10,6 +10,7 @@
 // (portable: no platform headers)
 #include "Analyzer.h"
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
