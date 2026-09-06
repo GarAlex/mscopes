@@ -46,6 +46,10 @@ app's **Install…** button installs for Music.
   re-open and why, device/wake/display events, audio going silent and coming
   back, and a heartbeat with the counters every 10 s. First place to look when
   the visuals stop.
+- `MSCOPES_TAP_CLOCK=0|1` forces a tap-only aggregate or one clocked by the
+  output device. Default: clocked only when the device has no input streams —
+  a device with a microphone (a display, AirPods) inside the aggregate lights
+  the "microphone in use" indicator even with its input switched off.
 - `MSCOPES_TAP=global` uses CoreAudio's global tap instead of the default
   mixdown of the playing processes — for comparison only: on macOS 26 the global
   tap (and a mixdown of every process object) goes silent for seconds to minutes

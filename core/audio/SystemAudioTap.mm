@@ -166,8 +166,9 @@ bool SystemAudioTap::start(std::string& err)
     NSString* aggUID = [[NSUUID UUID] UUIDString];
     NSString* tapUID = [desc.UUID UUIDString];
     NSString* outUID = nil; NSString* outName = @"?";
+    AudioObjectID outDev = kAudioObjectUnknown;
     {
-        AudioObjectID outDev = kAudioObjectUnknown; UInt32 dsz = sizeof(outDev);
+        UInt32 dsz = sizeof(outDev);
         AudioObjectPropertyAddress defAddr = { kAudioHardwarePropertyDefaultOutputDevice,
             kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
         if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &defAddr, 0, nullptr, &dsz, &outDev) == noErr
@@ -198,6 +199,28 @@ bool SystemAudioTap::start(std::string& err)
             @(kAudioSubTapDriftCompensationKey):@NO,
         } ],
     } mutableCopy];
+    // Only clock the aggregate by the output device when the device has no
+    // input streams of its own. A device with a microphone (a display, AirPods)
+    // brought in as a sub-device counts as "microphone in use" — the orange
+    // dot in the menu bar — even with its input streams switched off. Such
+    // devices get a tap-only aggregate instead; the silence safety net in the
+    // engine covers whatever the missing hardware clock might cost.
+    int devInputStreams = 0;
+    if (outDev != kAudioObjectUnknown) {
+        AudioObjectPropertyAddress sa = { kAudioDevicePropertyStreams,
+            kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain };
+        UInt32 dsz = 0;
+        AudioObjectGetPropertyDataSize(outDev, &sa, 0, nullptr, &dsz);
+        devInputStreams = (int)(dsz / sizeof(AudioObjectID));
+    }
+    const char* clockEnv = getenv("MSCOPES_TAP_CLOCK");   // "0": never, "1": always (comparison)
+    bool useClock = devInputStreams == 0;
+    if (clockEnv) useClock = strcmp(clockEnv, "0") != 0;
+    if (!useClock) {
+        os_log(tapLog(), "tap-only aggregate: \"%{public}@\" has %d input stream(s), so it is not used as a sub-device", outName, devInputStreams);
+        fprintf(stderr, "[tap] tap-only aggregate (\"%s\" has %d input stream(s))\n", outName.UTF8String, devInputStreams);
+        outUID = nil; outDev = kAudioObjectUnknown;
+    }
     if (outUID) {
         aggDict[@(kAudioAggregateDeviceMainSubDeviceKey)] = outUID;
         aggDict[@(kAudioAggregateDeviceSubDeviceListKey)] = @[ @{ @(kAudioSubDeviceUIDKey): outUID } ];
@@ -214,6 +237,34 @@ bool SystemAudioTap::start(std::string& err)
         return false;
     }
     os_log(tapLog(), "created aggregate id=%u", _aggID);
+
+    // The sub-device brings its own input streams into the aggregate (a
+    // display's or AirPods' microphone). They come first in the aggregate's
+    // input stream list, before the tap's. Switch them off: we only want
+    // the tap, and a running microphone stream lights the system's
+    // "microphone in use" indicator in the menu bar.
+    if (outDev != kAudioObjectUnknown) {
+        AudioObjectPropertyAddress sa = { kAudioDevicePropertyStreams,
+            kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain };
+        UInt32 dsz = 0;
+        AudioObjectGetPropertyDataSize(outDev, &sa, 0, nullptr, &dsz);
+        int devInputStreams = (int)(dsz / sizeof(AudioObjectID));
+        UInt32 asz = 0;
+        AudioObjectGetPropertyDataSize(_aggID, &sa, 0, nullptr, &asz);
+        std::vector<AudioObjectID> streams(asz / sizeof(AudioObjectID));
+        if (!streams.empty()) AudioObjectGetPropertyData(_aggID, &sa, 0, nullptr, &asz, streams.data());
+        int off = 0;
+        for (int i = 0; i < devInputStreams && i < (int)streams.size() - 1; ++i) {
+            UInt32 inactive = 0;
+            AudioObjectPropertyAddress act = { kAudioStreamPropertyIsActive,
+                kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+            if (AudioObjectSetPropertyData(streams[i], &act, 0, nullptr, sizeof(inactive), &inactive) == noErr) off++;
+        }
+        os_log(tapLog(), "aggregate input streams: %zu, device's own: %d, switched off: %d",
+               streams.size(), devInputStreams, off);
+        fprintf(stderr, "[tap] aggregate input streams: %zu, device's own: %d, switched off: %d\n",
+                streams.size(), devInputStreams, off);
+    }
 
     // 4) Query the input stream format (sample rate / channels).
     AudioStreamBasicDescription asbd = {};
