@@ -50,8 +50,12 @@ app's **Install…** button installs for Music.
   output device. Default: clocked only when the device has no input streams —
   a device with a microphone (a display, AirPods) inside the aggregate lights
   the "microphone in use" indicator even with its input switched off.
-- `MSCOPES_TAP=global` uses CoreAudio's global tap instead of the default
-  mixdown of the playing processes — for comparison only: on macOS 26 the global
-  tap (and a mixdown of every process object) goes silent for seconds to minutes
-  every few minutes while a tap of just the playing processes does not.
+- `MSCOPES_TAP=global` uses CoreAudio's global tap instead of the default —
+  for comparison only. Measured on macOS 26.6: a global tap, a mixdown of every
+  process object, and even a mixdown of just the playing processes all go
+  silent for seconds to minutes every few minutes while the music plays on; a
+  tap on a single process never did. So the engine opens one tap per process
+  that is producing output, sums them in the analyzer, follows the set as apps
+  start and stop, and re-opens a tap that produced audio and then went quiet
+  for 1.5 s. The sidebar's "reconnected ×N" counts those re-opens.
 - `MSCOPES_NO_GPU=1` forces every effect's CPU path.

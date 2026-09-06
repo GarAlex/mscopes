@@ -24,8 +24,11 @@ public:
     explicit SystemAudioTap(Callback cb) : _cb(std::move(cb)) {}
     ~SystemAudioTap();
 
-    // Returns true on success; on failure sets `err`.
-    bool start(std::string& err);
+    // Returns true on success; on failure sets `err`. Taps exactly `procs`
+    // (a mixdown of them; one process is the robust case on macOS 26 — see
+    // the .mm). The one-argument form taps the processes producing output.
+    bool start(std::string& err, const std::vector<AudioObjectID>& procs);
+    bool start(std::string& err) { return start(err, runningOutputProcesses()); }
     void stop();
 
     // Test aid: stop the IO proc but keep the objects, so the engine's

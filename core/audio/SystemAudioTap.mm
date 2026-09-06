@@ -108,7 +108,7 @@ void SystemAudioTap::watchProcesses(std::function<void()> handler)
     installPerProcessListeners();
 }
 
-bool SystemAudioTap::start(std::string& err)
+bool SystemAudioTap::start(std::string& err, const std::vector<AudioObjectID>& wanted)
 {
     // 1) Describe the tap. Two ways to tap "everything":
     //    - a global tap (initStereoGlobalTapButExcludeProcesses:@[]) — on
@@ -125,7 +125,8 @@ bool SystemAudioTap::start(std::string& err)
     const char* mode = getenv("MSCOPES_TAP");
     _procs.clear();
     if (!(mode && strcmp(mode, "global") == 0)) {
-        _procs = runningOutputProcesses();
+        _procs = wanted;
+        std::sort(_procs.begin(), _procs.end());
         for (AudioObjectID o : _procs) [procs addObject:@(o)];
     }
     CATapDescription* desc = procs.count

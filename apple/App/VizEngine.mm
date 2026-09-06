@@ -14,6 +14,9 @@
 #import  "Analyzer.h"
 #import  "SystemAudioTap.h"
 #include <os/log.h>
+#include <algorithm>
+#include <memory>
+#include <vector>
 #include "EffectHost.h"
 #include "BuiltinEffects.h"
 #include "Presets.h"
@@ -198,7 +201,21 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
 
 @implementation VizEngine {
     viz::Analyzer         _analyzer;
-    viz::SystemAudioTap*  _tap;
+    // One tap per process producing output (a tap that mixes several
+    // processes drops out on macOS 26 — see SystemAudioTap.mm); each feeds
+    // its own analyzer slot and is watched and re-opened on its own.
+    struct TapSlot {
+        std::unique_ptr<viz::SystemAudioTap> tap;
+        AudioObjectID proc = kAudioObjectUnknown;
+        std::string name;                          // bundle id, kept for the log after the process is gone
+        int index = 0;                             // analyzer slot
+        std::atomic<float> peak{0};                // raw level, decays
+        std::atomic<bool> hadSignal{false};        // produced audio since (re)open
+        CFTimeInterval lastRestart = 0;
+        int quietChecks = 0;
+        int blindRetries = 0;                      // re-opens of a tap that never had signal
+    };
+    std::vector<std::unique_ptr<TapSlot>> _slots;
     WVRenderView*         _view;
     // Tap supervision: a live tap stops delivering when the default output
     // device changes, its sample rate changes, or the Mac sleeps. The tick
@@ -519,60 +536,149 @@ static void wvLog(const char* fmt, ...)
     fputc('\n', f);
 }
 
-/// Create and start a fresh tap (the previous one, if any, is torn down).
-- (BOOL)openTap:(std::string&)err
+static std::string wvProcName(AudioObjectID proc)
 {
-    if (_tap) { _tap->stop(); delete _tap; _tap = nullptr; }
+    CFStringRef bid = nullptr; UInt32 sz = sizeof(bid);
+    AudioObjectPropertyAddress ba = { kAudioProcessPropertyBundleID,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    std::string name;
+    if (AudioObjectGetPropertyData(proc, &ba, 0, nullptr, &sz, &bid) == noErr && bid) {
+        name = [(__bridge NSString*)bid UTF8String] ?: "";
+        CFRelease(bid);
+    }
+    if (name.empty()) {
+        pid_t pid = 0; sz = sizeof(pid);
+        AudioObjectPropertyAddress pa = { kAudioProcessPropertyPID,
+            kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+        AudioObjectGetPropertyData(proc, &pa, 0, nullptr, &sz, &pid);
+        name = "pid " + std::to_string(pid);
+    }
+    return name;
+}
+
+static bool wvProcessRunningOutput(AudioObjectID proc)
+{
+    UInt32 running = 0, sz = sizeof(running);
+    AudioObjectPropertyAddress ra = { kAudioProcessPropertyIsRunningOutput,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    return AudioObjectGetPropertyData(proc, &ra, 0, nullptr, &sz, &running) == noErr && running;
+}
+
+- (int)freeSlotIndex
+{
+    for (int i = 0; i < viz::Analyzer::kSlots; ++i) {
+        bool used = false;
+        for (auto& sl : _slots) if (sl->index == i) { used = true; break; }
+        if (!used) return i;
+    }
+    return -1;
+}
+
+/// (Re)open one slot's tap on its process.
+- (BOOL)openSlot:(TapSlot*)slot err:(std::string&)err
+{
+    slot->tap.reset();
     viz::Analyzer* an = &_analyzer;
     std::atomic<unsigned long long>* cbs = &_cbs;
-    std::atomic<float>* inPeak = &_inPeak;
-    _tap = new viz::SystemAudioTap(
-        [an, cbs, inPeak](const float* interleaved, int frames, int channels, double sr) {
+    TapSlot* sp = slot;
+    int idx = slot->index;
+    auto tap = std::make_unique<viz::SystemAudioTap>(
+        [an, cbs, sp, idx](const float* interleaved, int frames, int channels, double sr) {
             (void)sr;
-            an->push(interleaved, frames, channels);
+            an->push(idx, interleaved, frames, channels);
             float m = 0.f;
             for (int i = 0, n = frames * channels; i < n; ++i) m = std::max(m, std::fabs(interleaved[i]));
-            inPeak->store(std::max(m, inPeak->load() * 0.9f));   // raw input level, decays
+            sp->peak.store(std::max(m, sp->peak.load() * 0.9f));
+            if (m > 0.003f) sp->hadSignal.store(true, std::memory_order_relaxed);
             cbs->fetch_add(1);
         });
-    if (!_tap->start(err)) {
-        delete _tap; _tap = nullptr;
-        return NO;
-    }
-    _sampleRate = _tap->sampleRate();
-    _channels   = _tap->channels();
-    _cbsSeen    = _cbs.load();
-    _cbsSeenAt  = CACurrentMediaTime();
-    wvLog("tap opened: %.0f Hz, %d ch, %s (cbs=%llu)", _sampleRate, _channels,
-          _tap->processCount() ? [NSString stringWithFormat:@"mixdown of %d playing process(es)", _tap->processCount()].UTF8String : "global (none playing)",
-          _cbs.load());
+    std::vector<AudioObjectID> procs;
+    if (slot->proc != kAudioObjectUnknown) procs.push_back(slot->proc);
+    if (!tap->start(err, procs)) return NO;
+    slot->tap = std::move(tap);
+    slot->lastRestart = CACurrentMediaTime();
+    slot->quietChecks = 0;
+    slot->peak.store(0.f);
+    slot->hadSignal.store(false);
+    if (_sampleRate <= 0) { _sampleRate = slot->tap->sampleRate(); _channels = slot->tap->channels(); }
     return YES;
+}
+
+/// Bring the taps in line with the processes producing output: one tap per
+/// process, taps of processes that stopped are closed, healthy ones are
+/// left alone. Returns the number of taps now open.
+- (NSInteger)reconcileTapsBecause:(const char*)why
+{
+    auto wanted = viz::SystemAudioTap::runningOutputProcesses();
+    if (wanted.size() > (size_t)viz::Analyzer::kSlots) wanted.resize(viz::Analyzer::kSlots);
+    for (auto it = _slots.begin(); it != _slots.end();) {
+        if (std::find(wanted.begin(), wanted.end(), (*it)->proc) == wanted.end()) {
+            wvLog("tap closed: %s stopped playing (%s)", (*it)->name.c_str(), why);
+            it = _slots.erase(it);
+        } else ++it;
+    }
+    std::string err;
+    for (AudioObjectID p : wanted) {
+        bool have = false;
+        for (auto& sl : _slots) if (sl->proc == p) { have = true; break; }
+        if (have) continue;
+        auto sl = std::make_unique<TapSlot>();
+        sl->proc = p;
+        sl->name = wvProcName(p);
+        sl->index = [self freeSlotIndex];
+        if (sl->index < 0) break;
+        if ([self openSlot:sl.get() err:err]) {
+            wvLog("tap opened: %s (%s) -> slot %d, %.0f Hz, %d ch", sl->name.c_str(), why,
+                  sl->index, sl->tap->sampleRate(), sl->tap->channels());
+            _slots.push_back(std::move(sl));
+        } else {
+            wvLog("tap open FAILED for %s: %s", sl->name.c_str(), err.c_str());
+        }
+    }
+    _cbsSeen   = _cbs.load();
+    _cbsSeenAt = CACurrentMediaTime();
+    return (NSInteger)_slots.size();
 }
 
 - (void)debugStallTap
 {
-    if (_tap) { _tap->pauseForTest(); wvLog("SIGUSR2: tap IO stopped for the watchdog test"); fprintf(stderr, "[VizEngine] SIGUSR2: tap IO stopped for the watchdog test\n"); }
+    for (auto& sl : _slots) if (sl->tap) sl->tap->pauseForTest();
+    wvLog("SIGUSR2: tap IO stopped on %zu tap(s) for the watchdog test", _slots.size());
+    fprintf(stderr, "[VizEngine] SIGUSR2: tap IO stopped for the watchdog test\n");
 }
 
-/// Re-open the tap in place. Main thread only. A failure is logged and left
-/// to the watchdog, which tries again a few seconds later.
+/// Re-open every tap (device change, wake, all callbacks stopped). Main
+/// thread only. A failure is logged and left to the watchdog.
 - (void)restartTapBecause:(const char*)why
 {
     if (!_capturing) return;
     _lastTapRestart = CACurrentMediaTime();
-    wvLog("tap re-open requested: %s (cbs=%llu, frames=%llu)", why, _cbs.load(), _frames);
+    wvLog("tap re-open requested: %s (cbs=%llu, frames=%llu, taps=%zu)", why, _cbs.load(), _frames, _slots.size());
+    _sampleRate = 0;
     std::string err;
-    if ([self openTap:err]) {
-        _tapRestarts++;
-        os_log(wvEngineLog(), "tap re-opened (%{public}s): %.0f Hz, %d ch, restart #%ld",
-               why, _sampleRate, (int)_channels, (long)_tapRestarts);
-        fprintf(stderr, "[VizEngine] tap re-opened (%s): %.0f Hz, %d ch\n", why, _sampleRate, _channels);
-    } else {
-        os_log_error(wvEngineLog(), "tap re-open failed (%{public}s): %{public}s", why, err.c_str());
-        wvLog("tap re-open FAILED (%s): %s", why, err.c_str());
-        fprintf(stderr, "[VizEngine] tap re-open failed (%s): %s\n", why, err.c_str());
-        _cbsSeenAt = CACurrentMediaTime();   // back off; the watchdog retries
+    int ok = 0;
+    for (auto& sl : _slots) {
+        if ([self openSlot:sl.get() err:err]) ok++;
+        else wvLog("tap re-open FAILED for %s: %s", sl->name.c_str(), err.c_str());
     }
+    [self reconcileTapsBecause:why];
+    _tapRestarts++;
+    os_log(wvEngineLog(), "taps re-opened (%{public}s): %d ok, restart #%ld", why, ok, (long)_tapRestarts);
+    fprintf(stderr, "[VizEngine] taps re-opened (%s): %d ok\n", why, ok);
+    _cbsSeen   = _cbs.load();
+    _cbsSeenAt = CACurrentMediaTime();
+}
+
+/// Re-open one tap that went quiet while its process still plays.
+- (void)reopenSlot:(TapSlot*)slot
+{
+    std::string err;
+    bool dropout = slot->hadSignal.load();
+    wvLog("tap re-open requested: %s %s (slot %d)", slot->name.c_str(),
+          dropout ? "went silent while playing" : "never produced audio (retry)", slot->index);
+    if ([self openSlot:slot err:err]) { if (dropout) _tapRestarts++; }   // the sidebar counts real dropouts only
+    else wvLog("tap re-open FAILED for %s: %s", slot->name.c_str(), err.c_str());
+    _lastTapRestart = CACurrentMediaTime();
 }
 
 - (void)scheduleTapRestartAfter:(double)seconds because:(const char*)why
@@ -604,11 +710,14 @@ static void wvLog(const char* fmt, ...)
         VizEngine* me = weakSelf; if (!me) return;
         unsigned gen = ++me->_procGen;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            VizEngine* me2 = weakSelf; if (!me2 || gen != me2->_procGen || !me2->_capturing || !me2->_tap) return;
+            VizEngine* me2 = weakSelf; if (!me2 || gen != me2->_procGen || !me2->_capturing) return;
             auto now = viz::SystemAudioTap::runningOutputProcesses();
-            if (now != me2->_tap->tappedProcesses()) {
-                wvLog("event: playing processes changed (%zu -> %zu)", me2->_tap->tappedProcesses().size(), now.size());
-                [me2 restartTapBecause:"playing processes changed"];
+            std::vector<AudioObjectID> have;
+            for (auto& sl : me2->_slots) have.push_back(sl->proc);
+            std::sort(have.begin(), have.end());
+            if (now != have) {
+                wvLog("event: playing processes changed (%zu -> %zu)", have.size(), now.size());
+                [me2 reconcileTapsBecause:"playing processes changed"];
             }
         });
     });
@@ -718,6 +827,24 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
 {
     if (!_capturing) return;
     CFTimeInterval now = CACurrentMediaTime();
+    // Per-tap safety net: a tap that produced audio and then went silent for
+    // 1.5 s while its process still reports playing is dead (the macOS 26
+    // dropout) — a fresh one is back at once; a track gap costs at most one
+    // harmless re-open. A tap that never produced anything belongs to a
+    // process that is "playing" silence (WebKit's GPU process, the phone
+    // helper) or was dead from the start: retry it with a growing backoff
+    // (10 s, 20 s, 40 s … up to ~5 min) so it costs nothing when idle.
+    for (auto& sl : _slots) {
+        if (sl->peak.load() >= 0.002f) { sl->quietChecks = 0; sl->blindRetries = 0; continue; }
+        sl->quietChecks++;
+        if (!wvProcessRunningOutput(sl->proc)) continue;
+        if (sl->hadSignal.load()) {
+            if (sl->quietChecks >= 3 && now - sl->lastRestart > 1.9) [self reopenSlot:sl.get()];
+        } else {
+            double wait = 10.0 * (double)(1 << std::min(sl->blindRetries, 5));
+            if (now - sl->lastRestart > wait) { sl->blindRetries++; [self reopenSlot:sl.get()]; }
+        }
+    }
     if (_lastTick > 0 && now - _lastTick > 2.0)
         [self restartDisplayLinkBecause:"no render ticks for 2 s"];
     // Audio going silent while callbacks keep coming is the other way the
@@ -727,15 +854,9 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
         // Safety net for the macOS 26 tap dropouts: silence from the tap
         // while some process still reports it is playing means the tap
         // died, not the music — a fresh tap comes back immediately.
-        // Checks are 0.5 s apart: first re-open after 1.5 s of silence, then
-        // every 2 s while it stays silent (a track gap costs one harmless
-        // re-open; a dead tap is back within about two seconds).
-        if (quiet >= 3 && ((quiet - 3) % 4) == 0 && now - _lastTapRestart > 1.9 && _capturing
-            && !viz::SystemAudioTap::runningOutputProcesses().empty())
-            [self restartTapBecause:"tap silent while an app is playing"];
         if (++quiet == 3 && !wasSilent) {
             wasSilent = true; silentSince = now;
-            double dr, ar; wvRates(&dr, &ar, _tap ? _tap->aggregateID() : kAudioObjectUnknown);
+            double dr, ar; wvRates(&dr, &ar, (!_slots.empty() && _slots[0]->tap) ? _slots[0]->tap->aggregateID() : kAudioObjectUnknown);
             wvLog("audio silent (cbs=%llu frames=%llu bpm=%.0f input peak %.4f) device %.0f Hz, aggregate %.0f Hz",
                   _cbs.load(), _frames, _bpm, _inPeak.load(), dr, ar);
         }
@@ -743,7 +864,7 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
         quiet = 0;
         if (wasSilent) {
             wasSilent = false;
-            double dr, ar; wvRates(&dr, &ar, _tap ? _tap->aggregateID() : kAudioObjectUnknown);
+            double dr, ar; wvRates(&dr, &ar, (!_slots.empty() && _slots[0]->tap) ? _slots[0]->tap->aggregateID() : kAudioObjectUnknown);
             wvLog("audio back after %.0f s (cbs=%llu frames=%llu) device %.0f Hz, aggregate %.0f Hz",
                   now - silentSince, _cbs.load(), _frames, dr, ar);
         }
@@ -751,9 +872,9 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
     static int n = 0;
     if ((++n % 20) == 0)
     {
-        double dr, ar; wvRates(&dr, &ar, _tap ? _tap->aggregateID() : kAudioObjectUnknown);
-        wvLog("heartbeat: cbs=%llu frames=%llu peak=%.3f in=%.3f bpm=%.0f tapRestarts=%ld linkRestarts=%ld device %.0f Hz agg %.0f Hz",
-              _cbs.load(), _frames, _peak, _inPeak.load(), _bpm, (long)_tapRestarts, (long)_linkRestarts, dr, ar);
+        double dr, ar; wvRates(&dr, &ar, (!_slots.empty() && _slots[0]->tap) ? _slots[0]->tap->aggregateID() : kAudioObjectUnknown);
+        wvLog("heartbeat: cbs=%llu frames=%llu peak=%.3f in=%.3f bpm=%.0f taps=%zu tapRestarts=%ld linkRestarts=%ld device %.0f Hz agg %.0f Hz",
+              _cbs.load(), _frames, _peak, _inPeak.load(), _bpm, _slots.size(), (long)_tapRestarts, (long)_linkRestarts, dr, ar);
     }
 }
 
@@ -764,15 +885,26 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
 {
     if (_capturing) return YES;
 
-    std::string err;
-    if (![self openTap:err]) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"com.writea.viz.engine" code:1
-                userInfo:@{ NSLocalizedDescriptionKey:
-                    [NSString stringWithUTF8String:err.c_str()] }];
+    _sampleRate = 0; _channels = 0;
+    NSInteger taps = [self reconcileTapsBecause:"capture start"];
+    if (taps == 0) {
+        // Nothing is playing yet; taps open as soon as something does. Still
+        // make sure a tap CAN be made (the system prompts for permission on
+        // the first one): try a throwaway global tap and surface its error.
+        std::string err;
+        viz::SystemAudioTap probe([](const float*, int, int, double) {});
+        std::vector<AudioObjectID> none;
+        if (!probe.start(err, none)) {
+            if (error) {
+                *error = [NSError errorWithDomain:@"com.writea.viz.engine" code:1
+                    userInfo:@{ NSLocalizedDescriptionKey:
+                        [NSString stringWithUTF8String:err.c_str()] }];
+            }
+            fprintf(stderr, "[VizEngine] start failed: %s\n", err.c_str());
+            return NO;
         }
-        fprintf(stderr, "[VizEngine] start failed: %s\n", err.c_str());
-        return NO;
+        _sampleRate = probe.sampleRate(); _channels = probe.channels();
+        probe.stop();
     }
 
     _capturing   = YES;
@@ -828,7 +960,7 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     [self stopDisplayLink];
     [self removeTapListeners];
     if (_capturing) wvLog("capture stopped (cbs=%llu frames=%llu)", _cbs.load(), _frames);
-    if (_tap) { _tap->stop(); delete _tap; _tap = nullptr; }
+    _slots.clear();
     _capturing = NO;
 }
 
@@ -844,12 +976,17 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     {
         unsigned long long c = _cbs.load();
         if (c != _cbsSeen) { _cbsSeen = c; _cbsSeenAt = now; }
-        else if (_capturing && _cbsSeenAt > 0 && now - _cbsSeenAt > 3.0 && now - _lastTapRestart > 5.0)
+        else if (_capturing && !_slots.empty() && _cbsSeenAt > 0 && now - _cbsSeenAt > 3.0 && now - _lastTapRestart > 5.0)
             [self restartTapBecause:"no audio callbacks for 3 s"];
     }
     double dt = _lastTick > 0 ? now - _lastTick : 1.0 / 60.0;
     _lastTick = now;
     _frames++;
+    {   // raw input level: the loudest tap
+        float m = 0.f;
+        for (auto& sl : _slots) m = std::max(m, sl->peak.load());
+        _inPeak.store(m);
+    }
     _fxCtx.dt = std::max(1.0 / 240.0, std::min(1.0 / 20.0, dt));
 
     // Adapt the internal render resolution to the view: half the backing pixel

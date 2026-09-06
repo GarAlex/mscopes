@@ -9,8 +9,9 @@ namespace viz {
 
 Analyzer::Analyzer() : _fft(kFFT)
 {
-    for (int c = 0; c < kMaxChannels; ++c)
-        _ring[c].assign(kRing, 0.f);
+    for (auto& sl : _slots)
+        for (int c = 0; c < kMaxChannels; ++c)
+            sl.ring[c].assign(kRing, 0.f);
 
     // Hann window in vDSP's "normalized" flavor (unit RMS: the plain window
     // scaled by sqrt(8/3)), so calibration matches the original Apple build.
@@ -22,33 +23,41 @@ Analyzer::Analyzer() : _fft(kFFT)
 
 Analyzer::~Analyzer() = default;
 
-void Analyzer::push(const float* interleaved, int numFrames, int channels)
+void Analyzer::push(int slot, const float* interleaved, int numFrames, int channels)
 {
-    if (!interleaved || numFrames <= 0 || channels <= 0) return;
-    _channels.store(std::min(channels, kMaxChannels), std::memory_order_relaxed);
-    uint64_t w = _written.load(std::memory_order_relaxed);
+    if (!interleaved || numFrames <= 0 || channels <= 0 || slot < 0 || slot >= kSlots) return;
+    Slot& sl = _slots[slot];
+    sl.channels.store(std::min(channels, kMaxChannels), std::memory_order_relaxed);
+    uint64_t w = sl.written.load(std::memory_order_relaxed);
     for (int n = 0; n < numFrames; ++n) {
         int pos = (int)((w + (uint64_t)n) % kRing);
         for (int c = 0; c < kMaxChannels; ++c) {
             int src = (c < channels) ? c : (channels - 1);   // dup last ch if mono
-            _ring[c][pos] = interleaved[n * channels + src];
+            sl.ring[c][pos] = interleaved[n * channels + src];
         }
     }
-    _written.store(w + (uint64_t)numFrames, std::memory_order_release);
+    sl.written.store(w + (uint64_t)numFrames, std::memory_order_release);
 }
 
 void Analyzer::analyze(VizFrame& out, double dtOverride)
 {
-    // Snapshot the newest kFFT samples (oldest first), lock-free.
+    // Sum the newest kFFT samples (oldest first) of every live slot, lock-free.
     float chan[kMaxChannels][kFFT];
-    int channels = _channels.load(std::memory_order_relaxed);
-    {
-        uint64_t w = _written.load(std::memory_order_acquire);
+    for (int c = 0; c < kMaxChannels; ++c)
+        for (int i = 0; i < kFFT; ++i) chan[c][i] = 0.f;
+    int channels = 1;
+    for (auto& sl : _slots) {
+        uint64_t w = sl.written.load(std::memory_order_acquire);
+        if (w == 0) continue;
+        bool live = w != sl.seen;
+        sl.seen = w;
+        if (!live) continue;                       // source stopped: leave it out
+        channels = std::max(channels, sl.channels.load(std::memory_order_relaxed));
         uint64_t start = w >= (uint64_t)kFFT ? w - (uint64_t)kFFT : 0;
         for (int c = 0; c < kMaxChannels; ++c)
             for (int i = 0; i < kFFT; ++i) {
                 uint64_t idx = start + (uint64_t)i;
-                chan[c][i] = idx < w ? _ring[c][idx % kRing] : 0.f;
+                if (idx < w) chan[c][i] += sl.ring[c][idx % kRing];
             }
     }
 
