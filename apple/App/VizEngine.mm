@@ -712,8 +712,8 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
     fprintf(stderr, "[VizEngine] display link rebuilt (%s)\n", why);
 }
 
-/// Once a second: rebuild the display link if ticks stopped, and write the
-/// heartbeat every 10 s.
+/// Twice a second: rebuild the display link if ticks stopped, re-open a
+/// silent tap, and write the heartbeat every 10 s.
 - (void)supervise
 {
     if (!_capturing) return;
@@ -727,10 +727,13 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
         // Safety net for the macOS 26 tap dropouts: silence from the tap
         // while some process still reports it is playing means the tap
         // died, not the music — a fresh tap comes back immediately.
-        if (quiet >= 3 && (quiet % 3) == 0 && now - _lastTapRestart > 8.0 && _capturing
+        // Checks are 0.5 s apart: first re-open after 1.5 s of silence, then
+        // every 2 s while it stays silent (a track gap costs one harmless
+        // re-open; a dead tap is back within about two seconds).
+        if (quiet >= 3 && ((quiet - 3) % 4) == 0 && now - _lastTapRestart > 1.9 && _capturing
             && !viz::SystemAudioTap::runningOutputProcesses().empty())
             [self restartTapBecause:"tap silent while an app is playing"];
-        if (++quiet == 2 && !wasSilent) {
+        if (++quiet == 3 && !wasSilent) {
             wasSilent = true; silentSince = now;
             double dr, ar; wvRates(&dr, &ar, _tap ? _tap->aggregateID() : kAudioObjectUnknown);
             wvLog("audio silent (cbs=%llu frames=%llu bpm=%.0f input peak %.4f) device %.0f Hz, aggregate %.0f Hz",
@@ -746,7 +749,7 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
         }
     }
     static int n = 0;
-    if ((++n % 10) == 0)
+    if ((++n % 20) == 0)
     {
         double dr, ar; wvRates(&dr, &ar, _tap ? _tap->aggregateID() : kAudioObjectUnknown);
         wvLog("heartbeat: cbs=%llu frames=%llu peak=%.3f in=%.3f bpm=%.0f tapRestarts=%ld linkRestarts=%ld device %.0f Hz agg %.0f Hz",
@@ -784,9 +787,9 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
     _lastTick = 0;
     _tickPending = false;
     [self startDisplayLink];
-    _supervisor = [NSTimer timerWithTimeInterval:1.0 target:self selector:@selector(supervise)
+    _supervisor = [NSTimer timerWithTimeInterval:0.5 target:self selector:@selector(supervise)
                                         userInfo:nil repeats:YES];
-    _supervisor.tolerance = 0.2;
+    _supervisor.tolerance = 0.1;
     [[NSRunLoop mainRunLoop] addTimer:_supervisor forMode:NSRunLoopCommonModes];
     return YES;
 }
