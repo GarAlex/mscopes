@@ -51,4 +51,9 @@ bool runCustomKernel(Framebuffer&, const std::string&, const float*, int, std::s
     return false;
 }
 
+void simRelease(SimState*& s) { s = nullptr; }
+bool flowParticles(SimState*&, Framebuffer&, const ParticleParams&, Framebuffer*) { return false; }
+bool fluid(SimState*&, Framebuffer&, const FluidParams&, Framebuffer*) { return false; }
+bool reactionDiffusion(SimState*&, Framebuffer&, const RDParams&) { return false; }
+
 }} // namespace viz::gpu

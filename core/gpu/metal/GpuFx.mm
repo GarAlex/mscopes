@@ -11,6 +11,7 @@
 #include <initializer_list>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace viz { namespace gpu {
 
@@ -2061,6 +2062,730 @@ bool runCustomKernel(Framebuffer& fb, const std::string& source,
          destinationOrigin:MTLOriginMake(0, 0, 0)];
         [b endEncoding];
         c->pendingOps++;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+//  Simulations: flow-field particles, stable fluids, reaction-diffusion
+// ---------------------------------------------------------------------------
+static const char* kSimShaders = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+// ---- randoms and noise ----
+static uint sim_hashu(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+}
+static float sim_rand(uint a, uint b) {
+    return float(sim_hashu(a * 0x9E3779B9u + sim_hashu(b))) * (1.0 / 4294967296.0);
+}
+static float3 sim_grad(float3 i) {
+    uint h = sim_hashu(uint(int(i.x)) * 73856093u ^ uint(int(i.y)) * 19349663u ^ uint(int(i.z)) * 83492791u);
+    float a = float(h & 0xffffu) * (6.2831853 / 65536.0);
+    float z = float(h >> 16) * (2.0 / 65536.0) - 1.0;
+    float r = sqrt(max(0.0, 1.0 - z * z));
+    return float3(r * cos(a), r * sin(a), z);
+}
+static float sim_noise(float3 p) {            // gradient noise, about -1..1
+    float3 i = floor(p), f = p - i;
+    float3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float n000 = dot(sim_grad(i), f);
+    float n100 = dot(sim_grad(i + float3(1, 0, 0)), f - float3(1, 0, 0));
+    float n010 = dot(sim_grad(i + float3(0, 1, 0)), f - float3(0, 1, 0));
+    float n110 = dot(sim_grad(i + float3(1, 1, 0)), f - float3(1, 1, 0));
+    float n001 = dot(sim_grad(i + float3(0, 0, 1)), f - float3(0, 0, 1));
+    float n101 = dot(sim_grad(i + float3(1, 0, 1)), f - float3(1, 0, 1));
+    float n011 = dot(sim_grad(i + float3(0, 1, 1)), f - float3(0, 1, 1));
+    float n111 = dot(sim_grad(i + float3(1, 1, 1)), f - float3(1, 1, 1));
+    return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+               mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+static float3 sim_hsv(float h, float s, float v) {
+    float3 k = clamp(abs(fract(h + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+    return v * mix(float3(1.0), k, s);
+}
+
+// ---- flow-field particles ----
+struct Particle { float2 pos; float2 vel; float2 prev; float life; float age; };
+struct PartU {
+    float aspect, dt, time, speed;
+    float scale, follow, drag, push;
+    float burst, turbulence, lifetime, width;
+    float brightness, hue, hueSpread, seed;
+    float W, H; uint count, frame;
+    uint reset, pad0, pad1, pad2;
+};
+
+static void sim_respawn(thread Particle& p, uint id, constant PartU& u) {
+    uint s = uint(u.seed * 977.0);
+    p.pos = float2((sim_rand(id, u.frame * 3u + 1u + s) * 2.0 - 1.0) * u.aspect,
+                    sim_rand(id, u.frame * 3u + 2u + s) * 2.0 - 1.0);
+    p.prev = p.pos;
+    p.vel = float2(0.0);
+    p.life = u.lifetime * (0.5 + sim_rand(id, u.frame * 3u + 3u + s));
+    p.age = 0.0;
+}
+
+kernel void sim_part_step(device Particle* ps [[buffer(0)]],
+                          constant PartU& u [[buffer(1)]],
+                          uint id [[thread_position_in_grid]])
+{
+    if (id >= u.count) return;
+    Particle p = ps[id];
+    if (u.reset != 0u) {                       // scatter, with lives spread out
+        sim_respawn(p, id, u);
+        p.life *= sim_rand(id, 99u);
+        p.age = 1.0;
+        ps[id] = p;
+        return;
+    }
+    p.prev = p.pos;
+    p.life -= u.dt;
+    p.age += u.dt;
+    if (p.life <= 0.0 || abs(p.pos.x) > u.aspect * 1.15 || abs(p.pos.y) > 1.15) {
+        sim_respawn(p, id, u);
+        ps[id] = p;
+        return;
+    }
+    // The flow: curl of animated noise, divergence-free, so it swirls and
+    // never piles particles up.
+    float3 q = float3(p.pos * u.scale, u.time * 0.15);
+    const float e = 0.02;
+    float dy = sim_noise(q + float3(0, e, 0)) - sim_noise(q - float3(0, e, 0));
+    float dx = sim_noise(q + float3(e, 0, 0)) - sim_noise(q - float3(e, 0, 0));
+    float2 flow = float2(dy, -dx) * (0.5 / e) * u.speed;
+    float r = length(p.pos) + 1e-3;
+    float2 radial = p.pos / r;
+    float2 jit = float2(sim_rand(id, u.frame * 5u + 11u), sim_rand(id, u.frame * 5u + 12u)) * 2.0 - 1.0;
+    p.vel += ((flow - p.vel) * u.follow + radial * u.push) * u.dt
+           + radial * (u.burst / (0.35 + r))
+           + jit * (u.turbulence * sqrt(u.dt));
+    p.vel *= exp(-u.drag * u.dt);
+    p.pos += p.vel * u.dt;
+    ps[id] = p;
+}
+
+struct PartOut { float4 pos [[position]]; float3 col; float across; };
+
+vertex PartOut sim_part_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
+                           const device Particle* ps [[buffer(0)]],
+                           constant PartU& u [[buffer(1)]])
+{
+    Particle p = ps[iid];
+    float2 halfSz = float2(u.W, u.H) * 0.5;
+    float2 A = p.prev * halfSz.y + halfSz;     // height units -> pixels (y down)
+    float2 B = p.pos * halfSz.y + halfSz;
+    float2 d = B - A;
+    float len = length(d);
+    float2 dir = len > 1e-3 ? d / len : float2(1.0, 0.0);
+    float2 nrm = float2(-dir.y, dir.x);
+    float hw = max(0.5, u.width * 0.5) + 0.75;  // plus an anti-aliasing fringe
+    const float2 corners[6] = { float2(0, -1), float2(1, -1), float2(1, 1),
+                                float2(0, -1), float2(1, 1), float2(0, 1) };
+    float2 cs = corners[vid];
+    float2 P = mix(A, B, cs.x) + dir * (cs.x * 2.0 - 1.0) * hw + nrm * cs.y * hw;
+    PartOut o;
+    o.pos = float4(P.x / u.W * 2.0 - 1.0, 1.0 - P.y / u.H * 2.0, 0.0, 1.0);
+    o.across = cs.y * hw / max(0.5, u.width * 0.5 + 0.25);
+    // A particle's light is the same however far it moved: a streak spreads
+    // it over its length. The total over all particles keeps the frame's
+    // mean near 0.08 * brightness at any count and resolution. Fade in
+    // after respawn, out before it.
+    float fade = smoothstep(0.0, 0.4, p.age) * smoothstep(0.0, 0.6, p.life);
+    float light = 0.08 * u.brightness * u.W * u.H / (float(u.count) * max(u.width, 1.0));
+    float e = light * fade / max(len, 1.0);
+    float tone = sim_rand(iid, 7u) - 0.5;
+    float speed = length(p.vel);
+    o.col = sim_hsv(u.hue + tone * u.hueSpread + speed * 0.08, 0.8 - min(speed, 1.0) * 0.2, 1.0) * e;
+    return o;
+}
+
+fragment half4 sim_part_fs(PartOut in [[stage_in]])
+{
+    float a = saturate(1.25 - abs(in.across));
+    return half4(half3(in.col * a), 1.0h);
+}
+
+// fb + light, clamped at white; the part above white goes to the overflow.
+kernel void sim_add(texture2d<float, access::read> fb [[texture(0)]],
+                    texture2d<float, access::sample> light [[texture(1)]],
+                    texture2d<float, access::write> dst [[texture(2)]],
+                    texture2d<float, access::read> ovIn [[texture(3)]],
+                    texture2d<float, access::write> ovOut [[texture(4)]],
+                    constant float4& u [[buffer(0)]],          // gain, hdr, mode (0 add, 1 replace)
+                    uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    constexpr sampler lin(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height());
+    float4 c = fb.read(g);
+    float3 l = max(light.sample(lin, uv).rgb, 0.0) * u.x;
+    float3 x = u.z > 0.5 ? l : c.rgb + l;
+    dst.write(float4(min(x, 1.0), 1.0), g);
+    if (u.y > 0.5) ovOut.write(float4(ovIn.read(g).rgb + max(x - 1.0, 0.0), 1.0), g);
+}
+
+// ---- stable fluids ----
+struct FlU { float dt, keep, vort, pad; };
+struct Splat { float x, y, vx, vy, r, g, b, radius; };
+
+kernel void sim_fl_advect(texture2d<float, access::sample> src [[texture(0)]],
+                          texture2d<float, access::sample> vel [[texture(1)]],
+                          texture2d<float, access::write> dst [[texture(2)]],
+                          constant FlU& u [[buffer(0)]],
+                          uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 sz = float2(dst.get_width(), dst.get_height());
+    float2 pos = float2(g) + 0.5;
+    float2 v = vel.sample(s, pos / sz).xy;             // cells / s
+    dst.write(src.sample(s, (pos - v * u.dt) / sz) * u.keep, g);
+}
+
+kernel void sim_fl_splat(texture2d<float, access::read> src [[texture(0)]],
+                         texture2d<float, access::write> dst [[texture(1)]],
+                         constant Splat* sp [[buffer(0)]],
+                         constant float4& info [[buffer(1)]],   // n, 0 velocity / 1 dye
+                         uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    float2 sz = float2(dst.get_width(), dst.get_height());
+    float2 uv = (float2(g) + 0.5) / sz;
+    float aspect = sz.x / sz.y;
+    float4 c = src.read(g);
+    for (int i = 0; i < int(info.x); ++i) {
+        float2 d = (uv - float2(sp[i].x, sp[i].y)) * float2(aspect, 1.0);
+        float w = exp(-dot(d, d) / max(sp[i].radius * sp[i].radius, 1e-6));
+        if (info.y > 0.5) c.rgb += float3(sp[i].r, sp[i].g, sp[i].b) * w;
+        else              c.xy  += float2(sp[i].vx, sp[i].vy) * sz.y * w;   // heights/s -> cells/s
+    }
+    dst.write(c, g);
+}
+
+static int2 sim_clampi(int2 i, int2 n) { return clamp(i, int2(0), n - 1); }
+
+kernel void sim_fl_curl(texture2d<float, access::read> vel [[texture(0)]],
+                        texture2d<float, access::write> dst [[texture(1)]],
+                        uint2 g [[thread_position_in_grid]])
+{
+    int2 n = int2(dst.get_width(), dst.get_height());
+    if (int(g.x) >= n.x || int(g.y) >= n.y) return;
+    int2 i = int2(g);
+    float L = vel.read(uint2(sim_clampi(i - int2(1, 0), n))).y;
+    float R = vel.read(uint2(sim_clampi(i + int2(1, 0), n))).y;
+    float T = vel.read(uint2(sim_clampi(i - int2(0, 1), n))).x;
+    float B = vel.read(uint2(sim_clampi(i + int2(0, 1), n))).x;
+    dst.write(float4(0.5 * ((R - L) - (B - T)), 0, 0, 0), g);
+}
+
+kernel void sim_fl_vort(texture2d<float, access::read> vel [[texture(0)]],
+                        texture2d<float, access::read> curl [[texture(1)]],
+                        texture2d<float, access::write> dst [[texture(2)]],
+                        constant FlU& u [[buffer(0)]],
+                        uint2 g [[thread_position_in_grid]])
+{
+    int2 n = int2(dst.get_width(), dst.get_height());
+    if (int(g.x) >= n.x || int(g.y) >= n.y) return;
+    int2 i = int2(g);
+    float L = abs(curl.read(uint2(sim_clampi(i - int2(1, 0), n))).x);
+    float R = abs(curl.read(uint2(sim_clampi(i + int2(1, 0), n))).x);
+    float T = abs(curl.read(uint2(sim_clampi(i - int2(0, 1), n))).x);
+    float B = abs(curl.read(uint2(sim_clampi(i + int2(0, 1), n))).x);
+    float C = curl.read(g).x;
+    float2 f = 0.5 * float2(B - T, R - L);
+    f /= length(f) + 1e-5;
+    f *= u.vort * C * float2(1.0, -1.0);
+    float4 v = vel.read(g);
+    dst.write(float4(v.xy + f * u.dt, 0, 0), g);
+}
+
+kernel void sim_fl_div(texture2d<float, access::read> vel [[texture(0)]],
+                       texture2d<float, access::write> dst [[texture(1)]],
+                       uint2 g [[thread_position_in_grid]])
+{
+    int2 n = int2(dst.get_width(), dst.get_height());
+    if (int(g.x) >= n.x || int(g.y) >= n.y) return;
+    int2 i = int2(g);
+    float2 C = vel.read(g).xy;
+    // Walls: the velocity across a wall is the mirror of the cell's own.
+    float L = i.x > 0       ? vel.read(uint2(i - int2(1, 0))).x : -C.x;
+    float R = i.x < n.x - 1 ? vel.read(uint2(i + int2(1, 0))).x : -C.x;
+    float T = i.y > 0       ? vel.read(uint2(i - int2(0, 1))).y : -C.y;
+    float B = i.y < n.y - 1 ? vel.read(uint2(i + int2(0, 1))).y : -C.y;
+    dst.write(float4(0.5 * ((R - L) + (B - T)), 0, 0, 0), g);
+}
+
+kernel void sim_fl_jacobi(texture2d<float, access::read> pr [[texture(0)]],
+                          texture2d<float, access::read> div [[texture(1)]],
+                          texture2d<float, access::write> dst [[texture(2)]],
+                          uint2 g [[thread_position_in_grid]])
+{
+    int2 n = int2(dst.get_width(), dst.get_height());
+    if (int(g.x) >= n.x || int(g.y) >= n.y) return;
+    int2 i = int2(g);
+    float L = pr.read(uint2(sim_clampi(i - int2(1, 0), n))).x;
+    float R = pr.read(uint2(sim_clampi(i + int2(1, 0), n))).x;
+    float T = pr.read(uint2(sim_clampi(i - int2(0, 1), n))).x;
+    float B = pr.read(uint2(sim_clampi(i + int2(0, 1), n))).x;
+    dst.write(float4((L + R + T + B - div.read(g).x) * 0.25, 0, 0, 0), g);
+}
+
+kernel void sim_fl_grad(texture2d<float, access::read> pr [[texture(0)]],
+                        texture2d<float, access::read> vel [[texture(1)]],
+                        texture2d<float, access::write> dst [[texture(2)]],
+                        uint2 g [[thread_position_in_grid]])
+{
+    int2 n = int2(dst.get_width(), dst.get_height());
+    if (int(g.x) >= n.x || int(g.y) >= n.y) return;
+    int2 i = int2(g);
+    float L = pr.read(uint2(sim_clampi(i - int2(1, 0), n))).x;
+    float R = pr.read(uint2(sim_clampi(i + int2(1, 0), n))).x;
+    float T = pr.read(uint2(sim_clampi(i - int2(0, 1), n))).x;
+    float B = pr.read(uint2(sim_clampi(i + int2(0, 1), n))).x;
+    float2 v = vel.read(g).xy - 0.5 * float2(R - L, B - T);
+    dst.write(float4(v, 0, 0), g);
+}
+
+kernel void sim_clear(texture2d<float, access::write> dst [[texture(0)]],
+                      constant float4& v [[buffer(0)]],
+                      uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    dst.write(v, g);
+}
+
+// ---- reaction-diffusion (Gray-Scott) ----
+struct RDU {
+    float du, dv, feed, kill;
+    float n, emboss, mixAmt, aspect;
+    float4 colA, colB;
+};
+struct RDSeedG { float x, y, radius, pad; };
+
+// U, V at i + (dx, dy), wrapping: a seamless torus.
+static float2 sim_rdAt(texture2d<float, access::read> t, int2 i, int dx, int dy, int2 n) {
+    return t.read(uint2((i.x + dx + n.x) % n.x, (i.y + dy + n.y) % n.y)).xy;
+}
+// Bilinear V at grid position q (rg32Float isn't filterable everywhere).
+static float sim_rdV(texture2d<float, access::read> t, float2 q, int2 n) {
+    float2 f = floor(q), w = q - f;
+    int2 a = int2(f);
+    float v00 = sim_rdAt(t, a, 0, 0, n).y, v10 = sim_rdAt(t, a, 1, 0, n).y;
+    float v01 = sim_rdAt(t, a, 0, 1, n).y, v11 = sim_rdAt(t, a, 1, 1, n).y;
+    return mix(mix(v00, v10, w.x), mix(v01, v11, w.x), w.y);
+}
+
+kernel void sim_rd_step(texture2d<float, access::read> src [[texture(0)]],
+                        texture2d<float, access::write> dst [[texture(1)]],
+                        constant RDU& u [[buffer(0)]],
+                        uint2 g [[thread_position_in_grid]])
+{
+    int2 n = int2(dst.get_width(), dst.get_height());
+    if (int(g.x) >= n.x || int(g.y) >= n.y) return;
+    int2 i = int2(g);
+    float2 c = sim_rdAt(src, i, 0, 0, n);
+    float2 lap = -c + 0.2 * (sim_rdAt(src, i, -1, 0, n) + sim_rdAt(src, i, 1, 0, n)
+                           + sim_rdAt(src, i, 0, -1, n) + sim_rdAt(src, i, 0, 1, n))
+                    + 0.05 * (sim_rdAt(src, i, -1, -1, n) + sim_rdAt(src, i, 1, -1, n)
+                            + sim_rdAt(src, i, -1, 1, n) + sim_rdAt(src, i, 1, 1, n));
+    float uvv = c.x * c.y * c.y;
+    float2 r = c + float2(u.du * lap.x - uvv + u.feed * (1.0 - c.x),
+                          u.dv * lap.y + uvv - (u.feed + u.kill) * c.y);
+    dst.write(float4(clamp(r, 0.0, 1.0), 0, 0), g);
+}
+
+kernel void sim_rd_seed(texture2d<float, access::read> src [[texture(0)]],
+                        texture2d<float, access::write> dst [[texture(1)]],
+                        constant RDSeedG* seeds [[buffer(0)]],
+                        constant RDU& u [[buffer(1)]],
+                        uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    float2 sz = float2(dst.get_width(), dst.get_height());
+    float2 uv = (float2(g) + 0.5) / sz;
+    float2 c = src.read(g).xy;
+    for (int k = 0; k < int(u.n); ++k) {
+        float2 d = (uv - float2(seeds[k].x, seeds[k].y)) * float2(sz.x / sz.y, 1.0);
+        if (length(d) < max(seeds[k].radius, 2.0 / sz.y))      // at least two cells across
+            c = float2(0.5, 0.25 + 0.1 * sim_rand(g.x * 7919u + g.y, uint(k)));
+    }
+    dst.write(float4(c, 0, 0), g);
+}
+
+kernel void sim_rd_composite(texture2d<float, access::read> fb [[texture(0)]],
+                             texture2d<float, access::read> rd [[texture(1)]],
+                             texture2d<float, access::write> dst [[texture(2)]],
+                             constant RDU& u [[buffer(0)]],
+                             uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    int2 n = int2(rd.get_width(), rd.get_height());
+    float2 p = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height()) * float2(n) - 0.5;
+    float v = sim_rdV(rd, p, n);
+    float gx = sim_rdV(rd, p + float2(1, 0), n) - sim_rdV(rd, p - float2(1, 0), n);
+    float gy = sim_rdV(rd, p + float2(0, 1), n) - sim_rdV(rd, p - float2(0, 1), n);
+    float shade = 1.0 + u.emboss * 4.0 * (gy - gx);     // light from the top left
+    float3 col = mix(u.colA.rgb, u.colB.rgb, smoothstep(0.1, 0.45, v)) * max(shade, 0.0);
+    float4 c = fb.read(g);
+    dst.write(float4(clamp(mix(c.rgb, col, u.mixAmt), 0.0, 1.0), 1.0), g);
+}
+)MSL";
+
+struct SimPipes {
+    bool tried = false, ok = false;
+    id<MTLLibrary> lib = nil;
+    id<MTLComputePipelineState> partStep = nil, add = nil, clear = nil,
+        flAdvect = nil, flSplat = nil, flCurl = nil, flVort = nil, flDiv = nil, flJacobi = nil, flGrad = nil,
+        rdStep = nil, rdSeed = nil, rdComposite = nil;
+    id<MTLRenderPipelineState> partDraw = nil;
+};
+static SimPipes gSim;
+
+static bool ensureSim(Ctx* c)
+{
+    if (gSim.tried) return gSim.ok;
+    gSim.tried = true;
+    NSError* err = nil;
+    gSim.lib = [c->dev newLibraryWithSource:@(kSimShaders) options:nil error:&err];
+    if (!gSim.lib) { NSLog(@"[gpu] simulation shaders failed: %@", err); return false; }
+    auto comp = [&](NSString* name) -> id<MTLComputePipelineState> {
+        id<MTLFunction> fn = [gSim.lib newFunctionWithName:name];
+        id<MTLComputePipelineState> ps = fn ? [c->dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+#if !__has_feature(objc_arc)
+        [fn release];
+#endif
+        if (!ps) NSLog(@"[gpu] simulation pipeline %@ failed: %@", name, err);
+        return ps;
+    };
+    gSim.partStep = comp(@"sim_part_step");
+    gSim.add = comp(@"sim_add");
+    gSim.clear = comp(@"sim_clear");
+    gSim.flAdvect = comp(@"sim_fl_advect");
+    gSim.flSplat = comp(@"sim_fl_splat");
+    gSim.flCurl = comp(@"sim_fl_curl");
+    gSim.flVort = comp(@"sim_fl_vort");
+    gSim.flDiv = comp(@"sim_fl_div");
+    gSim.flJacobi = comp(@"sim_fl_jacobi");
+    gSim.flGrad = comp(@"sim_fl_grad");
+    gSim.rdStep = comp(@"sim_rd_step");
+    gSim.rdSeed = comp(@"sim_rd_seed");
+    gSim.rdComposite = comp(@"sim_rd_composite");
+    {
+        id<MTLFunction> vs = [gSim.lib newFunctionWithName:@"sim_part_vs"];
+        id<MTLFunction> fs = [gSim.lib newFunctionWithName:@"sim_part_fs"];
+        MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
+        d.vertexFunction = vs;
+        d.fragmentFunction = fs;
+        MTLRenderPipelineColorAttachmentDescriptor* ca = d.colorAttachments[0];
+        ca.pixelFormat = MTLPixelFormatRGBA16Float;
+        ca.blendingEnabled = YES;
+        ca.rgbBlendOperation = ca.alphaBlendOperation = MTLBlendOperationAdd;
+        ca.sourceRGBBlendFactor = ca.sourceAlphaBlendFactor = MTLBlendFactorOne;
+        ca.destinationRGBBlendFactor = ca.destinationAlphaBlendFactor = MTLBlendFactorOne;
+        gSim.partDraw = (vs && fs) ? [c->dev newRenderPipelineStateWithDescriptor:d error:&err] : nil;
+        if (!gSim.partDraw) NSLog(@"[gpu] particle draw pipeline failed: %@", err);
+#if !__has_feature(objc_arc)
+        [vs release]; [fs release]; [d release];
+#endif
+    }
+    gSim.ok = gSim.partStep && gSim.add && gSim.clear && gSim.flAdvect && gSim.flSplat && gSim.flCurl
+           && gSim.flVort && gSim.flDiv && gSim.flJacobi && gSim.flGrad && gSim.rdStep && gSim.rdSeed
+           && gSim.rdComposite && gSim.partDraw;
+    return gSim.ok;
+}
+
+struct SimState {
+    int kind = 0;                                   // 1 particles, 2 fluid, 3 reaction-diffusion
+    uint32_t frame = 0;
+    // particles
+    id<MTLBuffer> parts = nil;
+    int count = 0;
+    id<MTLTexture> light = nil;                     // frame-sized rgba16Float, additive
+    int lightW = 0, lightH = 0;
+    // grids
+    int gw = 0, gh = 0;
+    id<MTLTexture> vel[2] = {nil, nil}, dye[2] = {nil, nil}, pr[2] = {nil, nil};
+    id<MTLTexture> div = nil, curl = nil;
+    id<MTLTexture> rd[2] = {nil, nil};
+    int vi = 0, di = 0, ri = 0;
+};
+
+void simRelease(SimState*& s)
+{
+    if (!s) return;
+    flush();                                        // pending work may still use the state
+    WV_RELEASE(s->parts);
+    WV_RELEASE(s->light);
+    for (auto& t : s->vel) WV_RELEASE(t);
+    for (auto& t : s->dye) WV_RELEASE(t);
+    for (auto& t : s->pr) WV_RELEASE(t);
+    for (auto& t : s->rd) WV_RELEASE(t);
+    WV_RELEASE(s->div);
+    WV_RELEASE(s->curl);
+    delete s;
+    s = nullptr;
+}
+
+static id<MTLTexture> simTexture(Ctx* c, int w, int h, MTLPixelFormat fmt, bool renderTarget = false)
+{
+    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+        width:(NSUInteger)w height:(NSUInteger)h mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite
+             | (renderTarget ? MTLTextureUsageRenderTarget : 0);
+    td.storageMode = MTLStorageModePrivate;
+    return [c->dev newTextureWithDescriptor:td];
+}
+
+// One compute dispatch over `out`'s size.
+static void simDispatch(id<MTLCommandBuffer> cb, id<MTLComputePipelineState> ps,
+                        std::initializer_list<id<MTLTexture>> texs, id<MTLTexture> out,
+                        const void* bytes0, size_t len0, const void* bytes1 = nullptr, size_t len1 = 0)
+{
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:ps];
+    NSUInteger i = 0;
+    for (id<MTLTexture> t : texs) [e setTexture:t atIndex:i++];
+    if (bytes0) [e setBytes:bytes0 length:len0 atIndex:0];
+    if (bytes1) [e setBytes:bytes1 length:len1 atIndex:1];
+    MTLSize tg = MTLSizeMake(16, 16, 1);
+    MTLSize grid = MTLSizeMake((out.width + 15) / 16, (out.height + 15) / 16, 1);
+    [e dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+    [e endEncoding];
+}
+
+// Composite `light` (any size, sampled bilinear) into fb: add or replace,
+// clamped at white, the excess to the overflow when given.
+static void simComposite(Ctx* c, id<MTLCommandBuffer> cb, Framebuffer& fb, id<MTLTexture> R,
+                         id<MTLTexture> light, float gain, int mode, Framebuffer* overflow)
+{
+    id<MTLTexture> OV = (overflow && overflow->w == fb.w && overflow->h == fb.h) ? fbTexture(c, *overflow) : nil;
+    id<MTLTexture> A = c->tex[0], B = c->tex[1];
+    float u[4] = { gain, OV ? 1.f : 0.f, (float)mode, 0.f };
+    simDispatch(cb, gSim.add, {R, light, A, OV ? OV : R, B}, A, u, sizeof(u));
+    id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+    const MTLSize sz = MTLSizeMake((NSUInteger)fb.w, (NSUInteger)fb.h, 1);
+    [b copyFromTexture:A sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:sz
+             toTexture:R destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    if (OV)
+        [b copyFromTexture:B sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:sz
+                 toTexture:OV destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [b endEncoding];
+}
+
+// Mirror of the shader's PartU.
+struct PartUHost {
+    float aspect, dt, time, speed;
+    float scale, follow, drag, push;
+    float burst, turbulence, lifetime, width;
+    float brightness, hue, hueSpread, seed;
+    float W, H; uint32_t count, frame;
+    uint32_t reset, pad0, pad1, pad2;
+};
+
+bool flowParticles(SimState*& s, Framebuffer& fb, const ParticleParams& p, Framebuffer* overflow)
+{
+    Ctx* c; id<MTLTexture> R = beginOp(c, fb);
+    if (!R || !ensureSim(c)) return false;
+    if (s && s->kind != 1) simRelease(s);
+    if (!s) { s = new SimState; s->kind = 1; }
+    const int count = std::clamp(p.count, 1000, 1000000);
+    bool reset = p.reset;
+    if (!s->parts || s->count != count) {
+        flush();
+        WV_RELEASE(s->parts);
+        s->parts = [c->dev newBufferWithLength:(NSUInteger)count * 32 options:MTLResourceStorageModePrivate];
+        if (!s->parts) return false;
+        s->count = count;
+        reset = true;
+    }
+    if (!s->light || s->lightW != fb.w || s->lightH != fb.h) {
+        flush();
+        WV_RELEASE(s->light);
+        s->light = simTexture(c, fb.w, fb.h, MTLPixelFormatRGBA16Float, true);
+        if (!s->light) return false;
+        s->lightW = fb.w; s->lightH = fb.h;
+    }
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = c->cb();
+        PartUHost u = {};
+        u.aspect = (float)fb.w / (float)fb.h; u.dt = p.dt; u.time = p.time; u.speed = p.speed;
+        u.scale = p.scale; u.follow = p.follow; u.drag = p.drag; u.push = p.push;
+        u.burst = p.burst; u.turbulence = p.turbulence; u.lifetime = std::max(0.2f, p.lifetime); u.width = p.width;
+        u.brightness = p.brightness; u.hue = p.hue; u.hueSpread = p.hueSpread; u.seed = p.seed;
+        u.W = (float)fb.w; u.H = (float)fb.h; u.count = (uint32_t)count; u.frame = s->frame++;
+        u.reset = reset ? 1u : 0u;
+        {
+            id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+            [e setComputePipelineState:gSim.partStep];
+            [e setBuffer:s->parts offset:0 atIndex:0];
+            [e setBytes:&u length:sizeof(u) atIndex:1];
+            [e dispatchThreads:MTLSizeMake((NSUInteger)count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [e endEncoding];
+        }
+        {
+            MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = s->light;
+            rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            [e setRenderPipelineState:gSim.partDraw];
+            [e setVertexBuffer:s->parts offset:0 atIndex:0];
+            [e setVertexBytes:&u length:sizeof(u) atIndex:1];
+            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6 instanceCount:(NSUInteger)count];
+            [e endEncoding];
+        }
+        simComposite(c, cb, fb, R, s->light, 1.f, 0, overflow);
+        if (++c->pendingOps >= 64) c->flush();
+    }
+    return true;
+}
+
+static bool simGrid(Ctx* c, SimState* s, int gw, int gh, bool fluidGrids)
+{
+    if (s->gw == gw && s->gh == gh && (fluidGrids ? s->vel[0] != nil : s->rd[0] != nil)) return true;
+    flush();
+    for (auto& t : s->vel) WV_RELEASE(t);
+    for (auto& t : s->dye) WV_RELEASE(t);
+    for (auto& t : s->pr) WV_RELEASE(t);
+    for (auto& t : s->rd) WV_RELEASE(t);
+    WV_RELEASE(s->div);
+    WV_RELEASE(s->curl);
+    s->gw = gw; s->gh = gh;
+    if (fluidGrids) {
+        for (int i = 0; i < 2; ++i) {
+            s->vel[i] = simTexture(c, gw, gh, MTLPixelFormatRGBA16Float);
+            s->dye[i] = simTexture(c, gw, gh, MTLPixelFormatRGBA16Float);
+            s->pr[i] = simTexture(c, gw, gh, MTLPixelFormatR32Float);
+            if (!s->vel[i] || !s->dye[i] || !s->pr[i]) return false;
+        }
+        s->div = simTexture(c, gw, gh, MTLPixelFormatR32Float);
+        s->curl = simTexture(c, gw, gh, MTLPixelFormatR32Float);
+        if (!s->div || !s->curl) return false;
+    } else {
+        for (int i = 0; i < 2; ++i) {
+            s->rd[i] = simTexture(c, gw, gh, MTLPixelFormatRG32Float);
+            if (!s->rd[i]) return false;
+        }
+    }
+    return true;
+}
+
+bool fluid(SimState*& s, Framebuffer& fb, const FluidParams& p, Framebuffer* overflow)
+{
+    Ctx* c; id<MTLTexture> R = beginOp(c, fb);
+    if (!R || !ensureSim(c)) return false;
+    if (s && s->kind != 2) simRelease(s);
+    if (!s) { s = new SimState; s->kind = 2; }
+    const float sc = std::clamp(p.scale, 0.05f, 1.f);
+    const int gw = std::max(16, (int)std::lround(fb.w * sc)), gh = std::max(9, (int)std::lround(fb.h * sc));
+    bool reset = p.reset || s->gw != gw || s->gh != gh || !s->vel[0];
+    if (!simGrid(c, s, gw, gh, true)) { simRelease(s); return false; }
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = c->cb();
+        if (reset) {
+            float z[4] = {0, 0, 0, 0};
+            for (int i = 0; i < 2; ++i) {
+                simDispatch(cb, gSim.clear, {s->vel[i]}, s->vel[i], z, sizeof(z));
+                simDispatch(cb, gSim.clear, {s->dye[i]}, s->dye[i], z, sizeof(z));
+                simDispatch(cb, gSim.clear, {s->pr[i]}, s->pr[i], z, sizeof(z));
+            }
+        }
+        auto flip = [](int& i) { i ^= 1; };
+        struct FlUHost { float dt, keep, vort, pad; };
+        const float dt = std::clamp(p.dt, 0.f, 0.1f);
+        // 1. splats: velocity, then dye
+        if (p.nSplats > 0 && p.splats) {
+            const int n = std::min(p.nSplats, 32);
+            float info[4] = { (float)n, 0.f, 0.f, 0.f };
+            simDispatch(cb, gSim.flSplat, {s->vel[s->vi], s->vel[s->vi ^ 1]}, s->vel[s->vi ^ 1],
+                        p.splats, sizeof(FluidSplat) * (size_t)n, info, sizeof(info));
+            flip(s->vi);
+            info[1] = 1.f;
+            simDispatch(cb, gSim.flSplat, {s->dye[s->di], s->dye[s->di ^ 1]}, s->dye[s->di ^ 1],
+                        p.splats, sizeof(FluidSplat) * (size_t)n, info, sizeof(info));
+            flip(s->di);
+        }
+        // 2. vorticity confinement
+        FlUHost u = { dt, 1.f, p.vorticity, 0.f };
+        simDispatch(cb, gSim.flCurl, {s->vel[s->vi], s->curl}, s->curl, nullptr, 0);
+        simDispatch(cb, gSim.flVort, {s->vel[s->vi], s->curl, s->vel[s->vi ^ 1]}, s->vel[s->vi ^ 1], &u, sizeof(u));
+        flip(s->vi);
+        // 3. pressure projection
+        simDispatch(cb, gSim.flDiv, {s->vel[s->vi], s->div}, s->div, nullptr, 0);
+        for (int it = 0; it < std::clamp(p.iterations, 1, 80); ++it) {
+            simDispatch(cb, gSim.flJacobi, {s->pr[s->ri], s->div, s->pr[s->ri ^ 1]}, s->pr[s->ri ^ 1], nullptr, 0);
+            flip(s->ri);
+        }
+        simDispatch(cb, gSim.flGrad, {s->pr[s->ri], s->vel[s->vi], s->vel[s->vi ^ 1]}, s->vel[s->vi ^ 1], nullptr, 0);
+        flip(s->vi);
+        // 4. advection: velocity through itself, then dye
+        u.keep = std::pow(std::clamp(p.velKeep, 0.f, 1.f), dt);
+        simDispatch(cb, gSim.flAdvect, {s->vel[s->vi], s->vel[s->vi], s->vel[s->vi ^ 1]}, s->vel[s->vi ^ 1], &u, sizeof(u));
+        flip(s->vi);
+        u.keep = std::pow(std::clamp(p.dyeKeep, 0.f, 1.f), dt);
+        simDispatch(cb, gSim.flAdvect, {s->dye[s->di], s->vel[s->vi], s->dye[s->di ^ 1]}, s->dye[s->di ^ 1], &u, sizeof(u));
+        flip(s->di);
+        // 5. into the frame
+        simComposite(c, cb, fb, R, s->dye[s->di], p.gain, p.mode, overflow);
+        if (++c->pendingOps >= 64) c->flush();
+    }
+    return true;
+}
+
+struct RDUHost {
+    float du, dv, feed, kill;
+    float n, emboss, mixAmt, aspect;
+    float colA[4], colB[4];
+};
+
+bool reactionDiffusion(SimState*& s, Framebuffer& fb, const RDParams& p)
+{
+    Ctx* c; id<MTLTexture> R = beginOp(c, fb);
+    if (!R || !ensureSim(c)) return false;
+    if (s && s->kind != 3) simRelease(s);
+    if (!s) { s = new SimState; s->kind = 3; }
+    const float sc = std::clamp(p.scale, 0.1f, 1.f);
+    const int gw = std::max(16, (int)std::lround(fb.w * sc)), gh = std::max(9, (int)std::lround(fb.h * sc));
+    bool reset = p.reset || s->gw != gw || s->gh != gh || !s->rd[0];
+    if (!simGrid(c, s, gw, gh, false)) { simRelease(s); return false; }
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = c->cb();
+        RDUHost u = {};
+        u.du = p.du; u.dv = p.dv; u.feed = p.feed; u.kill = p.kill;
+        u.emboss = p.emboss; u.mixAmt = p.mix; u.aspect = (float)gw / (float)gh;
+        for (int k = 0; k < 3; ++k) { u.colA[k] = p.colorA[k]; u.colB[k] = p.colorB[k]; }
+        if (reset) {
+            float one[4] = {1, 0, 0, 0};
+            simDispatch(cb, gSim.clear, {s->rd[s->ri]}, s->rd[s->ri], one, sizeof(one));
+        }
+        if (p.nSeeds > 0 && p.seeds) {
+            const int n = std::min(p.nSeeds, 64);
+            std::vector<float> sd((size_t)n * 4);
+            for (int k = 0; k < n; ++k) {
+                sd[(size_t)k * 4] = p.seeds[k].x; sd[(size_t)k * 4 + 1] = p.seeds[k].y;
+                sd[(size_t)k * 4 + 2] = p.seeds[k].radius; sd[(size_t)k * 4 + 3] = 0.f;
+            }
+            u.n = (float)n;
+            simDispatch(cb, gSim.rdSeed, {s->rd[s->ri], s->rd[s->ri ^ 1]}, s->rd[s->ri ^ 1],
+                        sd.data(), sd.size() * sizeof(float), &u, sizeof(u));
+            s->ri ^= 1;
+        }
+        for (int it = 0; it < std::clamp(p.iterations, 0, 64); ++it) {
+            simDispatch(cb, gSim.rdStep, {s->rd[s->ri], s->rd[s->ri ^ 1]}, s->rd[s->ri ^ 1], &u, sizeof(u));
+            s->ri ^= 1;
+        }
+        id<MTLTexture> A = c->tex[0];
+        simDispatch(cb, gSim.rdComposite, {R, s->rd[s->ri], A}, A, &u, sizeof(u));
+        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        [b copyFromTexture:A sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                sourceSize:MTLSizeMake((NSUInteger)fb.w, (NSUInteger)fb.h, 1)
+                 toTexture:R destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [b endEncoding];
+        if (++c->pendingOps >= 64) c->flush();
     }
     return true;
 }

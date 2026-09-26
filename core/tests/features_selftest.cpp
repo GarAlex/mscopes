@@ -18,6 +18,7 @@
 #include "EffectHost.h"
 #include "ModernEffects.h"
 #include "Presets.h"
+#include "GpuFx.h"
 #include "drumsynth.h"
 #include <cmath>
 #include <cstdio>
@@ -415,6 +416,41 @@ static void testPresetsOnFeatures()
     }
 }
 
+// The simulations (GPU, or their CPU versions under MSCOPES_NO_GPU=1):
+// each draws, keeps moving, and settles rather than filling the screen.
+static void testSimulations()
+{
+    std::printf("simulations (%s)\n", gpu::available() ? "GPU" : "CPU");
+    Drums d = makeDrums(true, true, true, 1.0, true);
+    for (const char* key : {"flow_particles", "fluid", "reaction_diffusion"}) {
+        EffectHost host;
+        host.resize(320, 180);
+        host.add(effectRegistry().at("clear_screen")());
+        host.add(effectRegistry().at(key)());
+        EffectContext ctx;
+        int i = 0;
+        std::vector<float> a, b;
+        run(d.sig, 60, [&](const VizFrame& f, double t) {
+            if (t > 3.0) return;
+            ctx.frame = (uint64_t)i; ctx.time = i / 60.0; ++i;
+            host.renderFrame(f, ctx);
+            if (i == 150) { const auto& px = host.currentSynced().px; a.assign(px.begin(), px.end()); }
+            if (i == 170) { const auto& px = host.currentSynced().px; b.assign(px.begin(), px.end()); }
+        });
+        double mean = 0, change = 0; bool finite = true;
+        for (size_t k = 0; k < b.size(); k += 4)
+            for (int c = 0; c < 3; ++c) {
+                finite &= std::isfinite(b[k + c]);
+                mean += b[k + c];
+                change += std::fabs(b[k + c] - a[k + c]);
+            }
+        mean /= 3.0 * (b.size() / 4); change /= 3.0 * (b.size() / 4);
+        std::printf("  %-18s mean %.3f, change over 20 frames %.4f\n", key, mean, change);
+        CHECK(finite && mean > 0.003 && mean < 0.5, "%s: finite %d mean %.3f", key, (int)finite, mean);
+        CHECK(change > 1e-4, "%s is not moving (%.5f)", key, change);
+    }
+}
+
 int main()
 {
     testBands();
@@ -426,6 +462,7 @@ int main()
     testTriggers();
     testVectorscope();
     testPresetsOnFeatures();
+    testSimulations();
     if (gFail) { std::printf("features_selftest: %d FAILED\n", gFail); return 1; }
     std::printf("features_selftest: ALL PASS\n");
     return 0;

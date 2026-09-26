@@ -187,4 +187,81 @@ bool blend(Framebuffer& dest, const Framebuffer& src, int mode, float adjustable
 bool runCustomKernel(Framebuffer& fb, const std::string& source,
                      const float* uniforms, int nUniforms, std::string* err);
 
+// --- simulations -------------------------------------------------------------
+// Persistent GPU state (particle buffers, fluid and reaction-diffusion grids)
+// behind an opaque handle the effect owns and frees with simRelease(). Each
+// call advances one frame and composites the result into fb. They return
+// false when the GPU can't run them (no device, a pipeline failed): the
+// effect then runs its CPU version. The effects work out the audio-driven
+// inputs (splats, seeds, forces) on the CPU, so both versions share them.
+struct SimState;
+void simRelease(SimState*& s);
+
+// Flow-field particles. Positions are in height units (y -1..1 down the
+// frame, x -aspect..aspect); the flow is the curl of animated noise, so it
+// never converges. Each particle is drawn as a motion-blurred streak from
+// where it was to where it is, additive, light spread over its length.
+struct ParticleParams {
+    int   count = 150000;
+    float dt = 1.f / 60.f, time = 0.f;
+    float speed = 0.5f;         // flow speed, height units / s
+    float scale = 1.5f;         // noise frequency (features per height)
+    float follow = 3.f;         // how fast velocity turns toward the flow (1/s)
+    float drag = 0.5f;          // 1/s
+    float push = 0.f;           // outward push this frame (bass), height units / s^2
+    float burst = 0.f;          // outward impulse this frame (a hit), height units / s
+    float turbulence = 0.f;     // random kick, height units / s
+    float lifetime = 4.f;       // seconds (each particle 0.5..1.5x)
+    float width = 1.f;          // streak width, pixels
+    float brightness = 1.f;
+    float hue = 0.55f, hueSpread = 0.2f;
+    float seed = 0.f;           // changes the respawn pattern
+    bool  reset = false;        // scatter every particle afresh
+};
+bool flowParticles(SimState*& s, Framebuffer& fb, const ParticleParams& p, Framebuffer* overflow);
+
+// Stable fluids (semi-Lagrangian advection, vorticity confinement, Jacobi
+// pressure) on a grid `scale` times the frame, carrying coloured dye that is
+// added to (mode 0) or replaces (mode 1) the frame.
+struct FluidSplat {
+    float x, y;                 // 0..1 across and down the frame
+    float vx, vy;               // velocity added, frame heights / s
+    float r, g, b;              // dye added
+    float radius;               // fraction of the frame height
+};
+struct FluidParams {
+    float scale = 0.25f;        // grid size / frame size
+    float dt = 1.f / 60.f;
+    float velKeep = 0.99f;      // velocity kept per second (0..1)
+    float dyeKeep = 0.6f;       // dye kept per second (0..1)
+    float vorticity = 20.f;
+    int   iterations = 20;      // pressure solve
+    float gain = 1.f;           // dye brightness in the frame
+    int   mode = 0;             // 0 add, 1 replace
+    const FluidSplat* splats = nullptr;
+    int   nSplats = 0;
+    bool  reset = false;
+};
+bool fluid(SimState*& s, Framebuffer& fb, const FluidParams& p, Framebuffer* overflow);
+
+// Gray-Scott reaction-diffusion on a grid `scale` times the frame. U and V
+// start as U=1, V=0; seeds set V in discs. The result is coloured from
+// colorA (no V) to colorB (full V), shaded by its slope, and mixed over the
+// frame by `mix`.
+struct RDSeed { float x, y, radius; };   // 0..1 across / down, radius in frame heights
+struct RDParams {
+    float scale = 0.5f;
+    float feed = 0.037f, kill = 0.06f;
+    float du = 1.f, dv = 0.5f;
+    int   iterations = 12;
+    const RDSeed* seeds = nullptr;
+    int   nSeeds = 0;
+    float colorA[3] = {0.02f, 0.02f, 0.05f};
+    float colorB[3] = {0.9f, 0.6f, 0.3f};
+    float mix = 1.f;
+    float emboss = 0.6f;
+    bool  reset = false;
+};
+bool reactionDiffusion(SimState*& s, Framebuffer& fb, const RDParams& p);
+
 }} // namespace viz::gpu

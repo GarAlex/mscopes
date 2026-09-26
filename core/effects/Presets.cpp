@@ -16,6 +16,7 @@
 #include "DelayEffects.h"
 #include "GpuEffects.h"
 #include "ModernEffects.h"
+#include "SimEffects.h"
 
 namespace viz {
 
@@ -104,6 +105,9 @@ const std::map<std::string, EffectFactory>& effectRegistry()
         {"neon_edges",      make<NeonEdgesEffect>()},
         {"duotone",         make<DuotoneEffect>()},
         {"vectorscope",     make<VectorscopeEffect>()},
+        {"flow_particles",  make<FlowParticlesEffect>()},
+        {"fluid",           make<FluidEffect>()},
+        {"reaction_diffusion", make<ReactionDiffusionEffect>()},
     };
     return reg;
 }
@@ -127,6 +131,7 @@ bool isModernEffectKey(const std::string& key)
         "tone_map", "vignette", "trails", "particles", "spectrum_bars",
         "shockwave", "glitch", "streaks", "crt", "shimmer",
         "lens", "radial_blur", "neon_edges", "duotone", "vectorscope",
+        "flow_particles", "fluid", "reaction_diffusion",
     };
     return modern.count(key) > 0;
 }
@@ -237,6 +242,39 @@ const std::vector<Preset>& builtinPresets()
             {"vectorscope",   {{"mode", 1}, {"delay", 96}, {"size", 0.85f}, {"gain", 1.4f}, {"hue", 0.36f}}},
             {"bloom",         {{"threshold", 0.4f}, {"radius", 14}, {"intensity", 1.3f}, {"bass_boost", 0.4f}}},
             {"vignette",      {{"inner", 0.5f}, {"outer", 1.25f}, {"strength", 0.6f}}},
+        }, /*modern=*/true},
+        // A hundred thousand particles riding a curl-noise flow, trailing
+        // silk; bass pushes them out, the kick bursts them from the centre.
+        { "Flow Field", {
+            {"trails",         {{"persistence", 0.95f}, {"mode", 2}}},
+            {"flow_particles", {{"count", 40000}, {"speed", 1.2f}, {"scale", 1.2f}, {"follow", 6},
+                                {"lifetime", 8}, {"brightness", 0.4f}, {"hue", 0.55f}, {"hue_spread", 0.3f},
+                                {"hue_speed", 0.01f}, {"trigger", 1}}},
+            {"bloom",          {{"threshold", 0.45f}, {"radius", 10}, {"intensity", 0.8f}}},
+            {"vignette",       {{"inner", 0.55f}, {"outer", 1.3f}, {"strength", 0.6f}}},
+        }, /*modern=*/true},
+        // Coloured ink stirred by the music: three emitters for lows, mids
+        // and highs, a burst on every kick.
+        { "Ink", {
+            {"fluid",          {{"mode", 1}, {"gain", 1.2f}, {"hue", 0.58f}, {"hue_spread", 0.35f}, {"trigger", 1}}},
+            {"bloom",          {{"threshold", 0.5f}, {"radius", 14}, {"intensity", 0.8f}}},
+            {"tone_map",       {{"exposure", 1.3f}, {"gamma", 1.0f}, {"saturation", 1.2f}}},
+            {"vignette",       {{"inner", 0.5f}, {"outer", 1.3f}, {"strength", 0.6f}}},
+        }, /*modern=*/true},
+        // Reaction-diffusion coral that grows and branches; the mids and
+        // highs lean the recipe, kicks plant new seeds.
+        { "Coral", {
+            {"reaction_diffusion", {{"feed", 0.055f}, {"kill", 0.062f}, {"hue", 0.03f}, {"trigger", 1}}},
+            {"vignette",       {{"inner", 0.5f}, {"outer", 1.3f}, {"strength", 0.5f}}},
+        }, /*modern=*/true},
+        // Drifting stars over clouds of coloured gas.
+        { "Nebula", {
+            {"fluid",          {{"mode", 1}, {"gain", 0.7f}, {"dye_keep", 0.6f}, {"hue", 0.62f},
+                                {"hue_spread", 0.3f}, {"emitters", 4}, {"trigger", 1}}},
+            {"flow_particles", {{"count", 60000}, {"brightness", 0.25f}, {"speed", 0.35f},
+                                {"hue", 0.12f}, {"hue_spread", 0.15f}, {"trigger", 2}}},
+            {"bloom",          {{"threshold", 0.5f}, {"radius", 16}, {"intensity", 0.9f}}},
+            {"vignette",       {{"inner", 0.5f}, {"outer", 1.25f}, {"strength", 0.6f}}},
         }, /*modern=*/true},
         // The pixel shader's aurora over a slow tunnel, graded cold.
         { "Aurora", {

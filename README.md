@@ -46,6 +46,11 @@ silicon and Intel); all versions on the
 - **HDR highlights.** Light that would clip at white turns white-hot instead,
   and on XDR screens it shines brighter than white. It lives only in what
   reaches the screen, so presets evolve exactly as before.
+- **Simulations on the GPU.** Flow-field particles (tens of thousands of
+  motion-blurred streaks riding curl noise), stable fluids carrying coloured
+  dye, and reaction-diffusion patterns that grow and divide, all driven by
+  the music. Presets: Flow Field, Ink, Coral, Nebula. Smaller CPU versions
+  run where there is no GPU.
 - **A GPU engine.** Zero-copy Metal backend over the framebuffer's own memory,
   deferred command buffers, the hot classic effects ported to compute kernels
   with the CPU loops as fallback. A steady 60 fps, paced by the display.

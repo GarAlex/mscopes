@@ -67,3 +67,6 @@ add_test(NAME avs     COMMAND avs_selftest ${CMAKE_SOURCE_DIR}/presets/tests ${T
 add_test(NAME picture COMMAND picture_selftest ${TEST_OUT}/picture)
 add_test(NAME draw    COMMAND draw_selftest ${TEST_OUT}/draw)
 add_test(NAME features COMMAND features_selftest)
+# The same with the GPU off: the simulations' CPU versions, as on Linux.
+add_test(NAME features-cpu COMMAND features_selftest)
+set_tests_properties(features-cpu PROPERTIES ENVIRONMENT "MSCOPES_NO_GPU=1")
