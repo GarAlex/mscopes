@@ -53,13 +53,11 @@ final class DockTileView: NSView {
 
     func update(bands: [Float], beat: Float, bpm: Float) {
         self.bands = bands
-        // Fast attack, slower release, like a meter. Highs are lifted a
-        // little (music rolls off with frequency) and compressed so a
-        // 128-pixel tile shows the whole shape, not just the bass.
-        let n = max(bands.count - 1, 1)
+        // Fast attack, slower release, like a meter. The engine already
+        // hands over display-ready heights (copyBands), balanced across the
+        // spectrum.
         for i in smoothed.indices {
-            let tilt = 0.7 + 1.1 * Float(i) / Float(n)
-            let v = min(1, sqrt(max(0, bands[i])) * tilt)
+            let v = min(1, max(0, bands[i]))
             smoothed[i] = v > smoothed[i] ? v : smoothed[i] * 0.72 + v * 0.28
         }
         self.beat = beat

@@ -33,8 +33,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Frames rendered since capture started (the render loop's own counter).
 @property (nonatomic, readonly) unsigned long long renderedFrames;
 
-/// Log-spaced spectrum bands (0..1) of the latest frame, for small meters
-/// such as the live Dock icon. Fills `out[0..count)`; count ≤ 32.
+/// Log-spaced spectrum bands of the latest frame as display-ready bar
+/// heights (0..1, balanced across the spectrum), for small meters such as
+/// the live Dock icon. Fills `out[0..count)`; count ≤ 32.
 - (void)copyBands:(float *)out count:(NSInteger)count;
 
 /// User-adjustable (demonstrates the SwiftUI → core control path).

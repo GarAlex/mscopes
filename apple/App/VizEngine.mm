@@ -1019,9 +1019,12 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
     if ((++n % 20) == 0)
     {
         double dr, ar; wvRates(&dr, &ar, (!_slots.empty() && _slots[0]->tap) ? _slots[0]->tap->aggregateID() : kAudioObjectUnknown);
-        wvLog("heartbeat: cbs=%llu frames=%llu peak=%.3f in=%.3f bpm=%.0f hits kick/snare/hat %d/%d/%d bands lo/mid/hi %.2f/%.2f/%.2f taps=%zu tapRestarts=%ld linkRestarts=%ld device %.0f Hz agg %.0f Hz",
+        float icon[3] = {0, 0, 0};                 // mean Dock-icon bar height: lows, mids, highs
+        for (int b = 0; b < 32; ++b) icon[b < 8 ? 0 : b < 22 ? 1 : 2] += _bands[b];
+        icon[0] /= 8; icon[1] /= 14; icon[2] /= 10;
+        wvLog("heartbeat: cbs=%llu frames=%llu peak=%.3f in=%.3f bpm=%.0f hits kick/snare/hat %d/%d/%d bands lo/mid/hi %.2f/%.2f/%.2f icon %.2f/%.2f/%.2f taps=%zu tapRestarts=%ld linkRestarts=%ld device %.0f Hz agg %.0f Hz",
               _cbs.load(), _frames, _peak, _inPeak.load(), _bpm, _hits[0], _hits[1], _hits[2],
-              _att[0], _att[1], _att[2],
+              _att[0], _att[1], _att[2], icon[0], icon[1], icon[2],
               _slots.size(), (long)_tapRestarts, (long)_linkRestarts, dr, ar);
         _hits[0] = _hits[1] = _hits[2] = 0;
     }
@@ -1205,9 +1208,13 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     }
 
     _peak = f.peakSpectrum(); _bass = f.bass; _mid = f.mid; _treble = f.treble;
-    if (f.hasFeatures) {   // the analyzer's log bands (each auto-gained) for small meters
+    // Display-ready levels for small meters (the Dock icon): 0..1 bar heights.
+    if (f.hasFeatures) {
+        // The analyzer's log bands already set their own gain, so every band
+        // sits fairly high; squared, a steady band rides mid-height and only
+        // its peaks reach the top (plain, the treble looked full all the time).
         static_assert(viz::kBands == 32, "meters show 32 bands");
-        for (int b = 0; b < 32; ++b) _bands[b] = f.bands[b];
+        for (int b = 0; b < 32; ++b) _bands[b] = f.bands[b] * f.bands[b];
     } else {   // 32 log-spaced bands over bins 1..kSpectrumBins
         const float lo = 1.f, hi = (float)viz::kSpectrumBins;
         for (int b = 0; b < 32; ++b) {
@@ -1216,7 +1223,10 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
             if (i1 <= i0) i1 = i0 + 1;
             float m = 0.f;
             for (int i = i0; i < i1 && i < viz::kSpectrumBins; ++i) m = std::max(m, f.spectrum[0][i]);
-            _bands[b] = std::min(1.f, m);
+            // Raw spectrum: music rolls off with frequency, so lift the highs
+            // and compress, or a small meter shows only the bass.
+            const float tilt = 0.7f + 1.1f * (float)b / 31.f;
+            _bands[b] = std::min(1.f, std::sqrt(m) * tilt);
         }
     }
     _view->frame = f;
