@@ -167,7 +167,7 @@ const std::vector<Preset>& builtinPresets()
         { "Bare Scope", {
             {"feedback_warp", {{"zoom", 1.0f}, {"zoom_bass", 0.0f}, {"spin", 0.0f},
                                {"spin_treble", 0.0f}, {"beat_kick", 0.0f}, {"decay", 0.80f}}},
-            {"scope",         {{"amp", 0.40f}, {"gain", 1.0f}}},
+            {"scope",         {{"amp", 0.40f}, {"gain", 1.0f}, {"steady", 1}}},
         }},
         // Modern showcase: classic tunnel folded through the GPU effects —
         // things 8-bit AVS structurally couldn't do (HDR bloom, soft rolloff).
@@ -180,8 +180,7 @@ const std::vector<Preset>& builtinPresets()
         }, /*modern=*/true},
         // Particle fountain with phosphor trails, graded like film.
         { "Ember Field", {
-            {"clear_screen",  {{"r", 0}, {"g", 0}, {"b", 0}}},
-            {"trails",        {{"persistence", 0.82f}, {"mode", 1}, {"beat_flash", 0.3f}, {"trigger", 2}}},
+            {"trails",        {{"persistence", 0.82f}, {"mode", 2}, {"beat_flash", 0.3f}, {"trigger", 2}}},
             {"particles",     {{"emit_rate", 110}, {"beat_burst", 200}, {"trigger", 1}, {"speed", 0.65f},
                                {"gravity", -0.25f}, {"drag", 0.45f}, {"size", 3},
                                {"hue", 0.07f}, {"hue_spread", 0.12f}, {"lifetime", 2.2f}}},
@@ -222,8 +221,7 @@ const std::vector<Preset>& builtinPresets()
         // Film noir in two colors: indigo shadows, coral highlights, grain
         // and streaks like an anamorphic print.
         { "Duotone Noir", {
-            {"clear_screen",  {{"r", 0}, {"g", 0}, {"b", 0}}},
-            {"trails",        {{"persistence", 0.8f}, {"mode", 0}}},
+            {"trails",        {{"persistence", 0.8f}, {"mode", 2}}},
             {"particles",     {{"emit_rate", 90}, {"beat_burst", 150}, {"trigger", 1}, {"speed", 0.4f},
                                {"gravity", 0.05f}, {"size", 5}, {"hue", 0.08f}, {"lifetime", 3}}},
             {"scope",         {{"amp", 0.3f}, {"gain", 1.0f}}},
@@ -235,8 +233,7 @@ const std::vector<Preset>& builtinPresets()
         // An analog scope's beam: every sample drawn as one continuous trace,
         // the signal against itself a moment earlier, fading like phosphor.
         { "Phosphor", {
-            {"clear_screen",  {{"r", 0}, {"g", 0}, {"b", 0}}},
-            {"trails",        {{"persistence", 0.62f}, {"mode", 1}}},
+            {"trails",        {{"persistence", 0.62f}, {"mode", 2}}},
             {"vectorscope",   {{"mode", 1}, {"delay", 96}, {"size", 0.85f}, {"gain", 1.4f}, {"hue", 0.36f}}},
             {"bloom",         {{"threshold", 0.4f}, {"radius", 14}, {"intensity", 1.3f}, {"bass_boost", 0.4f}}},
             {"vignette",      {{"inner", 0.5f}, {"outer", 1.25f}, {"strength", 0.6f}}},

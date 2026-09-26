@@ -320,6 +320,22 @@ kernel void fx_vignette(texture2d<float, access::read> src [[texture(0)]],
 }
 
 // p = [dx, dy] in pixels
+// Trails against the previous frame: p[0] persistence, p[1] mode
+// (0 crossfade, 1 phosphor max, 2 fade: the previous frame, dimmed).
+kernel void fx_trails(texture2d<float, access::read> cur [[texture(0)]],
+                      texture2d<float, access::read> prev [[texture(1)]],
+                      texture2d<float, access::write> dst [[texture(2)]],
+                      constant float* p [[buffer(0)]],
+                      uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    float4 c = cur.read(g);
+    float3 q = prev.read(g).rgb * p[0];
+    if (p[1] > 1.5)      dst.write(float4(q, 1.0), g);
+    else if (p[1] > 0.5) dst.write(float4(max(c.rgb, q), c.a), g);
+    else                 dst.write(float4(c.rgb * (1.0 - p[0]) + q, c.a), g);
+}
+
 kernel void fx_rgbsplit(texture2d<float, access::sample> src [[texture(0)]],
                         texture2d<float, access::write> dst [[texture(1)]],
                         constant float* p [[buffer(0)]],
@@ -865,6 +881,16 @@ kernel void pic_prefilter(texture2d<float, access::sample> src [[texture(0)]],
     if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
     float2 uv = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height());
     float3 c = clamp(box5(src, uv, u.srcTexel), 0.0, 4.0);
+    if (u.knee < 0.0) {
+        // The Bloom effect's threshold (as it always was): on luminance,
+        // rescaled so light at the threshold adds nothing. Saturated blues
+        // and reds, dim in luminance, barely glow; presets that feed their
+        // frame back (Neon Cathedral) are tuned on that.
+        float lum = dot(c, float3(0.299, 0.587, 0.114));
+        float k = lum <= u.threshold ? 0.0 : (lum - u.threshold) / max(1.0 - u.threshold, 1e-4);
+        dst.write(float4(c * k, 1.0), g);
+        return;
+    }
     float br = max(c.r, max(c.g, c.b));
     float soft = clamp(br - u.threshold + u.knee, 0.0, 2.0 * u.knee);
     soft = soft * soft / (4.0 * u.knee + 1e-4);
@@ -1087,7 +1113,7 @@ static Ctx* ctx()
         };
         if (!build(lib, @[@"fx_threshold", @"fx_blur", @"fx_bloom_combine",
                           @"fx_kaleido", @"fx_rgbsplit",
-                          @"fx_tonemap", @"fx_vignette",
+                          @"fx_tonemap", @"fx_vignette", @"fx_trails",
                           @"fx_shockwave", @"fx_glitch",
                           @"fx_streak_combine", @"fx_crt", @"fx_shimmer",
                           @"fx_lens", @"fx_radialblur", @"fx_edges", @"fx_duotone"]))
@@ -1775,7 +1801,7 @@ void convolve5(Framebuffer& fb, const float k[25], float invScale, float bias,
 void bloom(Framebuffer& fb, float threshold, float radius, float intensity, Framebuffer* overflow)
 {
     // A multi-scale pyramid (the picture pass's glow chain, shared: both run
-    // in order in one command buffer): soft-threshold prefilter, box
+    // in order in one command buffer): luminance-threshold prefilter, box
     // downsample to a depth set by the radius, tent upsample-and-add, then
     // frame + glow through the effect's soft rolloff. With an overflow
     // buffer (HDR) the light the rolloff removed above white is kept there.
@@ -1786,7 +1812,7 @@ void bloom(Framebuffer& fb, float threshold, float radius, float intensity, Fram
         const int L = std::clamp((int)std::lround(std::log2(std::max(2.f, radius))), 2, c->glowLevels);
         id<MTLCommandBuffer> cb = c->cb();
         const float t = std::clamp(threshold, 0.f, 4.f);
-        GlowU pu = { 1.f / fb.w, 1.f / fb.h, t, std::max(0.05f, t * 0.5f) };
+        GlowU pu = { 1.f / fb.w, 1.f / fb.h, t, -1.f };      // luminance threshold (see pic_prefilter)
         dispatch2D(cb, c->picPrefilter, R, c->glowDown[0], nil, pu);
         for (int i = 1; i < L; ++i) {
             id<MTLTexture> prev = c->glowDown[i - 1];
@@ -1803,7 +1829,10 @@ void bloom(Framebuffer& fb, float threshold, float radius, float intensity, Fram
         }
         // Combine into scratch (A = frame, B = overflow), copy both back.
         id<MTLTexture> A = c->tex[0], B = c->tex[1];
-        BloomU bu = { intensity * 2.2f / (float)L, OV ? 1.f : 0.f, 0, 0 };
+        // The pyramid sums L copies of the thresholded light, each spread
+        // wider: 1/L keeps the total what the old single blur added, so a
+        // preset's feedback settles where it was tuned to.
+        BloomU bu = { intensity / (float)L, OV ? 1.f : 0.f, 0, 0 };
         id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
         [e setComputePipelineState:c->picBloomAdd];
         [e setTexture:R atIndex:0];
@@ -1894,6 +1923,21 @@ void toneMap(Framebuffer& fb, float exposure, float gamma, float saturation, Fra
 void vignette(Framebuffer& fb, float inner, float outer, float strength)
 {
     onePass(fb, @"fx_vignette", {inner, outer, strength});
+}
+
+void trails(Framebuffer& fb, const Framebuffer& prev, float persistence, int mode)
+{
+    Ctx* c; id<MTLTexture> R = beginOp(c, fb);
+    if (!R) return;
+    id<MTLTexture> P = fbTexture(c, prev);
+    if (!P) return;
+    @autoreleasepool {
+        id<MTLTexture> A = c->tex[0];
+        Pass p[1];
+        p[0].kernel = @"fx_trails"; p[0].in0 = R; p[0].in1 = P; p[0].out = A;
+        p[0].params[0] = persistence; p[0].params[1] = (float)mode; p[0].nParams = 2;
+        run(c, p, 1, fb.w, fb.h, A, R);
+    }
 }
 
 void shockwave(Framebuffer& fb, const float radii[4], float width, float strength)

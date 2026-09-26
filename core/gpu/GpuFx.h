@@ -72,7 +72,7 @@ void syncToCpu(Framebuffer& fb);              // CPU will write fb: flush
 void syncToCpuForRead(const Framebuffer& fb); // CPU will read fb: flush
 void invalidateResident(const void* fbAddr);  // fb is being cleared/destroyed: flush
 
-// Bloom: soft-threshold prefilter → multi-scale pyramid (depth set by
+// Bloom: luminance-threshold prefilter → multi-scale pyramid (depth set by
 // radius, in source pixels) → frame + glow * intensity through a soft
 // rolloff. With an overflow buffer (HDR highlights) the light above white
 // the rolloff removed is added there; the frame is the same either way.
@@ -126,6 +126,11 @@ void toneMap(Framebuffer& fb, float exposure, float gamma, float saturation,
 // Darken toward the frame edge: fade from `inner` to `outer` radius
 // (aspect-true, 1 = half-height) by `strength` (0..1).
 void vignette(Framebuffer& fb, float inner, float outer, float strength);
+
+// Trails against the previous frame (same size): mode 0 crossfade, 1
+// phosphor max, 2 fade (the frame becomes the previous one times
+// persistence, as Clear Screen + trails would leave it, in one pass).
+void trails(Framebuffer& fb, const Framebuffer& prev, float persistence, int mode);
 
 // --- classic ports ---------------------------------------------------------
 // GPU versions of the CPU effects that dominated profiles (Movement, Dynamic

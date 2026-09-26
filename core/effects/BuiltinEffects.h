@@ -46,10 +46,16 @@ public:
 
     float amp  = 0.34f;        // waveform amplitude (fraction of height)
     float gain = 0.9f;         // additive brightness
+    // >0.5: draw the triggered waveform, which holds a steady tone still.
+    // Off by default: presets that zoom and mirror their own feedback rely
+    // on the trace moving; a still one lands on the same pixels every frame
+    // and the feedback piles its light up (Neon Cathedral washed out).
+    float steady = 0.f;
 
     std::vector<Param> params() override {
         return {{"amp", 0.05f, 0.6f, &amp},
-                {"gain", 0.2f, 1.5f, &gain}};
+                {"gain", 0.2f, 1.5f, &gain},
+                {"steady", 0.f, 1.f, &steady}};
     }
 };
 

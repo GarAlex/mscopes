@@ -407,6 +407,11 @@ static void testPresetsOnFeatures()
         for (int y = 0; y < fb.h; ++y) for (int x = 0; x < fb.w; ++x)
             for (int c = 0; c < 3; ++c) { float v = fb.at(x, y)[c]; finite &= std::isfinite(v); sum += v; }
         CHECK(finite && sum > 1.0, "%s: finite %d, energy %.1f", p.name.c_str(), (int)finite, sum);
+        // No washout: presets that feed their frame back must settle, not
+        // fill the screen (Neon Cathedral once went half white when Bloom
+        // added more light than it was tuned for; it sits near 0.04).
+        const double mean = sum / (3.0 * fb.w * fb.h);
+        CHECK(mean < 0.3, "%s washed out: mean %.3f", p.name.c_str(), mean);
     }
 }
 

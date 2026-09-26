@@ -3,6 +3,7 @@
 //
 #include "ModernEffects.h"
 #include "LineMode.h"
+#include "GpuFx.h"
 #include <algorithm>
 #include <cmath>
 
@@ -11,20 +12,35 @@ namespace viz {
 // ---------------------------------------------------------------------------
 //  TrailsEffect
 // ---------------------------------------------------------------------------
+bool TrailsEffect::isGpu() const { return gpu::available(); }
+
 void TrailsEffect::render(Framebuffer& cur, const Framebuffer& prev,
                           const VizFrame& a, const EffectContext& ctx)
 {
-    if (cur.px.size() != prev.px.size() || cur.px.empty()) return;
+    const int m = std::clamp((int)std::lround(mode), 0, 2);
+    if (cur.px.size() != prev.px.size() || cur.px.empty()) {
+        if (m == 2 && !cur.px.empty()) cur.clear();      // fade from nothing: black
+        return;
+    }
 
     if (onBeat(a)) _flash = beatFlash;
     _flash *= std::pow(0.05, ctx.dt);
     float p = std::clamp(persistence - (float)_flash, 0.f, 0.98f);
-    if (p <= 0.f) return;
+    if (p <= 0.f && m != 2) return;
+
+    if (gpu::available()) { gpu::trails(cur, prev, p, m); return; }
 
     float* c = cur.px.data();
     const float* q = prev.px.data();
     const size_t n = cur.px.size();
-    if (mode > 0.5f) {
+    if (m == 2) {
+        for (size_t i = 0; i < n; i += 4) {          // fade: the previous frame, dimmed
+            c[i]     = q[i]     * p;
+            c[i + 1] = q[i + 1] * p;
+            c[i + 2] = q[i + 2] * p;
+            c[i + 3] = 1.f;
+        }
+    } else if (m == 1) {
         for (size_t i = 0; i < n; i += 4) {          // phosphor: max with decay
             c[i]     = std::max(c[i],     q[i]     * p);
             c[i + 1] = std::max(c[i + 1], q[i + 1] * p);
@@ -203,17 +219,28 @@ void VectorscopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     int i0 = 0;
     if (_haveLast) { px = _lx; py = _ly; }
     else { point(0, px, py); i0 = 1; }
+    // Runs of steps shorter than a pixel or so are merged into one segment
+    // carrying all their light: the same picture at a fraction of the
+    // segments (at 60 fps and 48 kHz most of the 800 steps are sub-pixel).
+    const float kMerge = 1.5f * std::max(1.f, drawQuality().widthScale);
     bool first = true;
+    int m = 0;                                   // samples merged into the pending segment
+    float path = 0.f, qx = px, qy = py;          // path length so far, last sample point
     for (int i = i0; i < n; ++i) {
         float x, y;
         point(i, x, y);
+        path += std::hypot(x - qx, y - qy);
+        qx = x; qy = y;
+        ++m;
+        if (path < kMerge && m < 16 && i != n - 1) continue;
         const float len = std::hypot(x - px, y - py);
-        const float e = std::min(k / std::max(len, 0.7f), 1.5f);
+        const float e = std::min((float)m * k / std::max(len, 0.7f), 1.5f);
         const bool capStart = first || sharpTurn(ppx, ppy, px, py, x, y);
         drawSegmentAA(cur, px, py, x, y, hw, rgb[0] * e, rgb[1] * e, rgb[2] * e,
                       /*additive*/1, 1.f, capStart, i == n - 1);
         ppx = px; ppy = py; px = x; py = y;
         first = false;
+        m = 0; path = 0.f;
     }
     _lx = px; _ly = py; _haveLast = a.hasFeatures && a.recentCount > 1;
 }

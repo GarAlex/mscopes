@@ -46,7 +46,9 @@ void ShockwaveEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     double dt = _lastTime < 0 ? 1.0 / 60.0 : std::max(0.0, ctx.time - _lastTime);
     _lastTime = ctx.time;
 
-    if (onBeat(a) && ((int)trigger != 0 || a.bass >= bassGate)) {   // the gate is for the plain beat
+    // The bass gate filters the plain beat; a detected drum needs no gate.
+    const bool drum = a.hasFeatures && (int)trigger != 0;
+    if (onBeat(a) && (drum || a.bass >= bassGate)) {
         for (auto& r : _radii)                   // claim a free (or oldest) slot
             if (r < 0) { r = 0.01f; goto spawned; }
         _radii[0] = 0.01f;

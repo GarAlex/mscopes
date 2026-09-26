@@ -15,16 +15,18 @@ class TrailsEffect : public Effect {
 public:
     const char* name() const override { return "Trails"; }
     bool usesPrev() const override { return true; }
+    bool isGpu() const override;
     void render(Framebuffer& cur, const Framebuffer& prev,
                 const VizFrame& a, const EffectContext& ctx) override;
 
     float persistence = 0.85f;   // how much of the previous frame survives
-    float mode        = 1.f;     // 0 crossfade, 1 phosphor max
+    float mode        = 1.f;     // 0 crossfade, 1 phosphor max, 2 fade (replaces
+                                 // the frame: what Clear Screen + trails leaves)
     float beatFlash   = 0.f;     // temporarily lower persistence on beat
 
     std::vector<Param> params() override {
         return {{"persistence", 0.f, 0.98f, &persistence},
-                {"mode", 0.f, 1.f, &mode},
+                {"mode", 0.f, 2.f, &mode},
                 {"beat_flash", 0.f, 1.f, &beatFlash},
                 {"trigger", 0.f, 3.f, &trigger}};
     }

@@ -76,9 +76,9 @@ void ScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     // Waveform oscilloscope. Smooth: an anti-aliased additive trace through
     // the interpolated waveform, a segment every two pixels. Otherwise one
     // bright additive dot per column, hue cycling, as it always was. With
-    // the analyzer's features the trace is the triggered waveform, so a
-    // steady tone stands still instead of sliding.
-    const float* wave = a.hasFeatures ? a.scope[0] : a.waveform[0];
+    // `steady` and the analyzer's features the trace is the triggered
+    // waveform, so a steady tone stands still instead of sliding.
+    const float* wave = (a.hasFeatures && steady > 0.5f) ? a.scope[0] : a.waveform[0];
     if (drawQuality().smooth) {
         const float hw = 0.5f * std::max(0.25f, drawQuality().widthScale);
         const int N = std::max(2, W / 2);
@@ -117,13 +117,18 @@ void ScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
 
     // Spectrum glow along the bottom: additive colored bars (short). With
     // features, the log bands (each with its own gain) spread the music
-    // over the whole width; without, linear bins as before.
+    // over the whole width; without, linear bins as before. Presets feed
+    // this glow back through zoom and mirrors, so it must carry about the
+    // light the old one did: the bands sit near half height all the time,
+    // so only a band near its own recent peak glows much (cubed), and the
+    // average stays close to the old glow's while the peaks show.
     const int bars = 96;
     for (int bar = 0; bar < bars; ++bar) {
         float f = (float)bar / bars;
         float e;
         if (a.hasFeatures) {
-            e = a.bandAt((f + 0.5f / bars) * 1.0f) * 0.55f;
+            const float b = a.bandAt(f + 0.5f / bars);
+            e = b * b * b * 0.3f;
         } else {
             int lo = (int)(f * kSpectrumBins), hi = std::min((int)((f + 1.f/bars) * kSpectrumBins), kSpectrumBins);
             e = 0; for (int i = lo; i < hi; ++i) e += a.spectrum[0][i];
