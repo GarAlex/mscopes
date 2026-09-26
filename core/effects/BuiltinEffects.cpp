@@ -2,6 +2,7 @@
 // BuiltinEffects.cpp
 //
 #include "BuiltinEffects.h"
+#include "LineMode.h"
 #include "GpuFx.h"
 #include <cmath>
 #include <algorithm>
@@ -72,9 +73,30 @@ void ScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     const float midY = H * 0.5f;
     float hueBase = (float)(ctx.frame % 600) / 600.f;
 
-    // Waveform oscilloscope: one bright additive dot per column, hue cycling.
+    // Waveform oscilloscope. Smooth: an anti-aliased additive trace through
+    // the interpolated waveform, a segment every two pixels. Otherwise one
+    // bright additive dot per column, hue cycling, as it always was.
+    if (drawQuality().smooth) {
+        const float hw = 0.5f * std::max(0.25f, drawQuality().widthScale);
+        const int N = std::max(2, W / 2);
+        float lx = 0.f, ly = midY, llx = 0.f, lly = midY;
+        for (int i = 0; i < N; ++i) {
+            float t = (float)i / (N - 1);
+            float pos = t * (kWaveformSamples - 1);
+            int i0 = (int)pos, i1 = std::min(i0 + 1, kWaveformSamples - 1);
+            float s = a.waveform[0][i0] + (a.waveform[0][i1] - a.waveform[0][i0]) * (pos - (float)i0);
+            float x = 0.5f + t * (W - 1), y = midY + s * (H * amp);
+            if (i > 0) {
+                float r, g, b;
+                hsv(hueBase + t * 0.25f, 0.85f, gain, r, g, b);
+                drawSegmentAA(cur, lx, ly, x, y, hw, r, g, b, /*additive*/1, 1.f,
+                              i == 1 || sharpTurn(llx, lly, lx, ly, x, y), i == N - 1);
+            }
+            llx = lx; lly = ly; lx = x; ly = y;
+        }
+    }
     float prevY = midY;
-    for (int x = 0; x < W; ++x) {
+    for (int x = 0; x < W && !drawQuality().smooth; ++x) {
         float t = (float)x / (W - 1);
         int wi = std::min((int)(t * kWaveformSamples), kWaveformSamples - 1);
         float s = a.waveform[0][wi];
@@ -244,6 +266,11 @@ void StarfieldEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         float px = cx + s.x / s.z * scale;
         float py = cy + s.y / s.z * scale;
         float lum = brightness * (1.f - s.z) * (0.6f + 0.4f * a.mid);
+        if (drawQuality().smooth) {            // sub-pixel disc: no stepping as stars crawl
+            plotDotAA(cur, px, py, std::max(0.25f, drawQuality().widthScale),
+                      lum, lum, std::min(1.f, lum * 1.15f), /*additive*/1, 1.f);
+            continue;
+        }
         // 2x2 additive splat, slightly blue-white
         int ix = (int)px, iy = (int)py;
         for (int oy = 0; oy < 2; ++oy)
@@ -295,7 +322,22 @@ void SpectrumBarsEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     }
 
     // waveform trace across the vertical center
-    if (waveAmp > 0.f) {
+    if (waveAmp > 0.f && drawQuality().smooth) {
+        const float hw = 0.5f * std::max(0.25f, drawQuality().widthScale);
+        const int N = std::max(2, W / 2);
+        float lx = 0.f, ly = 0.f, llx = 0.f, lly = 0.f;
+        for (int i = 0; i < N; ++i) {
+            float t = (float)i / (N - 1);
+            float pos = t * (kWaveformSamples - 1);
+            int i0 = (int)pos, i1 = std::min(i0 + 1, kWaveformSamples - 1);
+            float s = a.waveform[0][i0] + (a.waveform[0][i1] - a.waveform[0][i0]) * (pos - (float)i0);
+            float x = 0.5f + t * (W - 1), y = std::clamp(H * 0.5f + s * waveAmp * H, 0.f, (float)H);
+            if (i > 0)
+                drawSegmentAA(cur, lx, ly, x, y, hw, 0.9f, 0.9f, 0.9f, /*replace*/0, 1.f,
+                              i == 1 || sharpTurn(llx, lly, lx, ly, x, y), i == N - 1);
+            llx = lx; lly = ly; lx = x; ly = y;
+        }
+    } else if (waveAmp > 0.f) {
         int prevY = -1;
         for (int x = 0; x < W; ++x) {
             int i = x * (kWaveformSamples - 1) / std::max(1, W - 1);

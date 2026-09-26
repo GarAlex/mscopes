@@ -4,6 +4,8 @@
 //   vizrender <preset.avs|.json> [--audio track.wav] [--frames N] [--fps 60]
 //             [--size WxH] [--out dir]
 //   vizrender --builtin "<name>"    (or --list to see the built-in presets)
+//   --smooth      smooth drawing (anti-aliased, sub-pixel lines and dots)
+//   --width-scale x   render pixels per point for line widths (default 1)
 //   --last        write only the final frame (a still, without filling the disk:
 //                 a 1280x720 sequence is ~1.5 MB per frame)
 //
@@ -27,6 +29,7 @@
 #include "Presets.h"
 #include "Picture.h"
 #include "GpuFx.h"
+#include "LineMode.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -99,6 +102,8 @@ int main(int argc, const char** argv)
         else if (a == "--size") { const char* s = next(); sscanf(s, "%dx%d", &W, &H); }
         else if (a == "--out") out = next();
         else if (a == "--last") lastOnly = true;
+        else if (a == "--smooth") drawQuality().smooth = true;
+        else if (a == "--width-scale") drawQuality().widthScale = (float)atof(next());
         else if (a == "--list-looks") { for (const auto& n : lookNames()) printf("%s\n", n.c_str()); return 0; }
         else if (a == "--look") { lookName = next(); usePicture = true; }
         else if (a == "--cube") { cubePath = next(); usePicture = true; }

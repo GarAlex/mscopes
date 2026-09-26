@@ -109,6 +109,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) float scanlines;              // 0..1
 @property (nonatomic) BOOL pictureReactsToBeat;     // grain and glow breathe with the music
 @property (nonatomic) BOOL sharpScaling;            // de-ringed bicubic upscale (default YES)
+/// Drawing quality (applied as lines and dots are drawn, so feedback
+/// carries it): anti-aliased sub-pixel lines, and the full backing
+/// resolution for presets that keep 60 fps there. Classic .avs presets get
+/// them only when classicEnhanced; otherwise they render exactly as in AVS.
+@property (nonatomic) BOOL smoothLines;             // default YES
+@property (nonatomic) BOOL highResolution;          // default YES
+@property (nonatomic) BOOL classicEnhanced;         // default NO (Authentic)
+@property (nonatomic, readonly) BOOL presetIsClassic;
 /// Load a .cube look. On success the look becomes the current one (lookIndex
 /// -1) and nil is returned; otherwise a short error message.
 - (nullable NSString *)loadCustomLookAtPath:(NSString *)path;

@@ -37,6 +37,11 @@ silicon and Intel); all versions on the
   grain, vignette and scanlines over any preset, with sharp upscaling and
   dithering. They act only on what reaches the screen, never on the frame a
   preset feeds back, so classic presets still behave exactly as authored.
+- **Smooth drawing.** Scopes, lines and dots are anti-aliased at sub-pixel
+  precision as they are drawn, so trails built from feedback stay smooth
+  too, and presets render at the screen's full resolution when they hold
+  60 fps there. Classic presets stay pixel-exact AVS ("Authentic") unless
+  you switch them to "Enhanced".
 - **A GPU engine.** Zero-copy Metal backend over the framebuffer's own memory,
   deferred command buffers, the hot classic effects ported to compute kernels
   with the CPU loops as fallback. A steady 60 fps, paced by the display.

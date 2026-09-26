@@ -9,6 +9,7 @@
 // AVS_PROFILE=1 (per-effect cost ranking across the run).
 //
 #include "testsupport.h"
+#include "LineMode.h"
 #include "AvsPreset.h"
 #include "JsonPreset.h"
 #include <algorithm>
@@ -51,6 +52,9 @@ int main(int argc, const char** argv)
     const int simW = getenv("AVS_W") ? atoi(getenv("AVS_W")) : 640;
     const int simH = getenv("AVS_H") ? atoi(getenv("AVS_H")) : 360;
     const bool profile = getenv("AVS_PROFILE") != nullptr;
+    // AVS_SMOOTH=1: render with smooth drawing (the "Classic presets:
+    // Enhanced" path) — for timing and crash sweeps of that path.
+    if (getenv("AVS_SMOOTH")) drawQuality().smooth = true;
     struct Cost { double ms = 0; long frames = 0; };
     std::map<std::string, Cost> costs;
     double totalMs = 0; long totalFrames = 0;

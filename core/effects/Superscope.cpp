@@ -79,16 +79,9 @@ void SuperscopeEffect::rebuild(int w, int h)
 
 // Dots and lines go through the global line mode (LineMode.h): AVS's default
 // is replace; a Set Render Mode component earlier in the stack changes it.
-static void putReplace(Framebuffer& fb, int x, int y, float r, float g, float b)
-{
-    putLinePixel(fb, x, y, r, g, b);
-}
-
-static void drawLine(Framebuffer& fb, float x0, float y0, float x1, float y1,
-                     float r, float g, float b, int width)
-{
-    drawLineMode(fb, (int)x0, (int)y0, (int)x1, (int)y1, r, g, b, width);
-}
+// The Q entry points pick the rasterizer from the draw quality: Authentic
+// truncates to whole pixels exactly as before, Smooth keeps the sub-pixel
+// positions the script computed.
 
 void SuperscopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
                               const VizFrame& a, const EffectContext& ctx)
@@ -127,23 +120,30 @@ void SuperscopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     const int chanSel = (int)channel;      // 0 center, 1 left, 2 right
     const bool useSpec = (int)source == 1;
 
-    float px = 0, py = 0;
-    bool havePrev = false;
+    const bool smooth = drawQuality().smooth;
+    auto sampleAt = [&](int si) -> double {
+        if (useSpec)
+            return (chanSel == 2) ? a.spectrum[1][si]
+                 : (chanSel == 1) ? a.spectrum[0][si]
+                 : (a.spectrum[0][si] + a.spectrum[1][si]) * 0.5;
+        return (chanSel == 2) ? a.waveform[1][si]
+             : (chanSel == 1) ? a.waveform[0][si]
+             : (a.waveform[0][si] + a.waveform[1][si]) * 0.5;
+    };
+    const int nSrc = useSpec ? kSpectrumBins : kWaveformSamples;
+
+    float px = 0, py = 0, ppx = 0, ppy = 0;
+    bool havePrev = false, prevDrawn = false;   // prevDrawn: the segment ending at (px, py) was drawn
     for (int idx = 0; idx < n; ++idx) {
         double i01 = (n == 1) ? 0.0 : (double)idx / (n - 1);
 
-        // v: audio value at this scope position
-        int si = (int)(i01 * ((useSpec ? kSpectrumBins : kWaveformSamples) - 1));
-        double v;
-        if (useSpec) {
-            v = (chanSel == 2) ? a.spectrum[1][si]
-              : (chanSel == 1) ? a.spectrum[0][si]
-              : (a.spectrum[0][si] + a.spectrum[1][si]) * 0.5;
-        } else {
-            v = (chanSel == 2) ? a.waveform[1][si]
-              : (chanSel == 1) ? a.waveform[0][si]
-              : (a.waveform[0][si] + a.waveform[1][si]) * 0.5;
-        }
+        // v: audio value at this scope position. Authentic takes the nearest
+        // sample below; Smooth interpolates, so scopes with more points than
+        // samples draw curves instead of stair steps.
+        double pos = i01 * (nSrc - 1);
+        int si = (int)pos;
+        double v = sampleAt(si);
+        if (smooth && si + 1 < nSrc) v += (sampleAt(si + 1) - v) * (pos - si);
 
         *_i = i01;
         *_v = v;
@@ -163,12 +163,20 @@ void SuperscopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         float b = (float)std::clamp(*_blue, 0.0, 1.0) * gain;
 
         if (*_skip <= 0.0) {
-            if (*_drawmode > 0.0 && havePrev)   // AVS passes the scope's own linesize
-                drawLine(cur, px, py, fx, fy, r, g, b,
-                         std::clamp((int)(*_linesize + 0.5), 1, 255));
-            else
-                putReplace(cur, (int)fx, (int)fy, r, g, b);
+            if (*_drawmode > 0.0 && havePrev) { // AVS passes the scope's own linesize
+                drawLineQ(cur, px, py, fx, fy, r, g, b,
+                          std::clamp((int)(*_linesize + 0.5), 1, 255),
+                          /*capStart=*/!prevDrawn || sharpTurn(ppx, ppy, px, py, fx, fy),
+                          /*capEnd=*/idx == n - 1);
+                prevDrawn = true;
+            } else {
+                putDotQ(cur, fx, fy, r, g, b);
+                prevDrawn = false;
+            }
+        } else {
+            prevDrawn = false;
         }
+        ppx = px; ppy = py;
         px = fx; py = fy;
         havePrev = *_skip <= 0.0;
     }

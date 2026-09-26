@@ -12,6 +12,7 @@
 #include "VizFrame.h"
 #include "GpuFx.h"
 #include "Picture.h"
+#include "LineMode.h"
 #import  "Analyzer.h"
 #import  "SystemAudioTap.h"
 #include <os/log.h>
@@ -211,6 +212,15 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     viz::LookTable        _customLook;     // a loaded .cube look
     NSInteger             _lookIndex;      // 0 = Off, -1 = custom
     NSString*             _customLookName;
+    // Draw quality (LineMode.h DrawQuality) and render resolution. Classic
+    // presets (.avs files) get them only when "Classic presets: Enhanced".
+    BOOL                  _smoothLines;
+    BOOL                  _highResolution;
+    BOOL                  _classicEnhanced;
+    BOOL                  _presetIsClassic;
+    BOOL                  _highResBlocked;   // this preset missed the frame budget at high res
+    double                _renderMsAvg;
+    int                   _overBudgetFrames;
     viz::Analyzer         _analyzer;
     // One tap per process producing output (a tap that mixes several
     // processes drops out on macOS 26 — see SystemAudioTap.mm); each feeds
@@ -283,6 +293,10 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
         _sensitivity = 1.0f;
         _lookIndex = 0;
         _view->pic = &_pic;
+        _smoothLines = YES;
+        _highResolution = YES;
+        _classicEnhanced = NO;
+        _presetIsClassic = NO;
         _aspectMode = 1;               // fill: shapes stay round fullscreen
         _cbs = 0;
         gEngineForSignals = self;
@@ -403,6 +417,7 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     _currentPreset = index;
     _host.beginCrossfade(1.2);            // Milkdrop-style preset blend
     viz::applyPreset(_host, presets[(size_t)index]);
+    [self presetKindChanged:NO];
 }
 
 - (NSArray<NSString *> *)effectNames
@@ -514,6 +529,7 @@ static NSString* safeNS(const std::string& s)
     viz::AvsLoadReport rep;
     _host.beginCrossfade(1.2);
     viz::loadAvsPresetFile(_host, std::string(path.UTF8String), rep);
+    [self presetKindChanged:YES];
     return safeNS(rep.summary());
 }
 
@@ -527,11 +543,29 @@ static NSString* safeNS(const std::string& s)
     if (isFirst) {
         _host.beginCrossfade(1.2);
         viz::loadAvsPresetFile(_host, std::string(path.UTF8String), rep, false);
+        [self presetKindChanged:YES];
     } else {
         viz::loadAvsPresetFile(_host, std::string(path.UTF8String), rep, true);
     }
     return safeNS(rep.summary());
 }
+
+// A new preset: note whether it is a classic .avs one (quality settings
+// apply to those only in Enhanced mode) and give high resolution a fresh try.
+- (void)presetKindChanged:(BOOL)classic
+{
+    _presetIsClassic = classic;
+    _highResBlocked = NO;
+    _overBudgetFrames = 0;
+}
+
+- (BOOL)smoothLines { return _smoothLines; }
+- (void)setSmoothLines:(BOOL)b { _smoothLines = b; }
+- (BOOL)highResolution { return _highResolution; }
+- (void)setHighResolution:(BOOL)b { _highResolution = b; _highResBlocked = NO; _overBudgetFrames = 0; }
+- (BOOL)classicEnhanced { return _classicEnhanced; }
+- (void)setClassicEnhanced:(BOOL)b { _classicEnhanced = b; _highResBlocked = NO; _overBudgetFrames = 0; }
+- (BOOL)presetIsClassic { return _presetIsClassic; }
 
 - (void)setAspectMode:(NSInteger)mode { _aspectMode = (int)mode; }
 - (NSInteger)aspectMode { return _aspectMode; }
@@ -558,6 +592,7 @@ static NSString* safeNS(const std::string& s)
     std::string err;
     _host.beginCrossfade(1.2);
     bool ok = viz::loadJsonPresetFile(_host, std::string(path.UTF8String), &err);
+    [self presetKindChanged:NO];
     return ok ? [NSString stringWithFormat:@"loaded, %zu effects", _host.count()]
               : safeNS(err);
 }
@@ -1057,11 +1092,24 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     NSSize vb = _view.bounds.size;
     CGFloat scale = _view.window ? _view.window.backingScaleFactor : 2.0;
     // 1 buffer px per point: half the backing size on retina, full size on 1x.
-    CGFloat factor = (scale >= 2.0) ? 0.5 : 1.0;
-    int tw = (int)std::min(1280.0, std::max(480.0, vb.width  * scale * factor));
-    int th = (int)std::min(800.0,  std::max(270.0, vb.height * scale * factor));
+    // High resolution (Picture ▸ Quality): the full backing resolution, up to
+    // 2560x1600, for presets that keep within the frame budget there — a
+    // preset that doesn't drops back to one pixel per point until the next
+    // preset (see the budget check after renderFrame).
+    const bool enhance = !_presetIsClassic || _classicEnhanced;
+    const bool highRes = _highResolution && enhance && !_highResBlocked;
+    CGFloat factor = highRes ? 1.0 : ((scale >= 2.0) ? 0.5 : 1.0);
+    const double capW = highRes ? 2560.0 : 1280.0, capH = highRes ? 1600.0 : 800.0;
+    int tw = (int)std::min(capW, std::max(480.0, vb.width  * scale * factor));
+    int th = (int)std::min(capH, std::max(270.0, vb.height * scale * factor));
     if (std::abs(tw - _host.current().w) > 32 || std::abs(th - _host.current().h) > 32)
         _host.resize(tw, th);
+    {   // How lines and dots are drawn this frame (LineMode.h). widthScale:
+        // render pixels per point, so a one-pixel line stays one point wide.
+        viz::DrawQuality& dq = viz::drawQuality();
+        dq.smooth = _smoothLines && enhance;
+        dq.widthScale = vb.width > 0 ? std::max(1.f, (float)(_host.current().w / vb.width)) : 1.f;
+    }
 
     // The sensitivity slider also makes the onset detector fire more/less
     // readily (it is ratio-based, so scaling the spectrum alone wouldn't).
@@ -1114,6 +1162,23 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     CFTimeInterval tE = CACurrentMediaTime();
 
     [_view presentFrame];
+
+    // Frame budget at high resolution: render + present averaging over 11 ms
+    // for a second and a half means this preset can't hold 60 fps up there.
+    {
+        double ms = (tE - tR) * 1000.0 + _view->blitMs;
+        _renderMsAvg = _renderMsAvg * 0.95 + ms * 0.05;
+        if (highRes && _renderMsAvg > 11.0) {
+            if (++_overBudgetFrames > 90) {
+                _highResBlocked = YES;
+                _overBudgetFrames = 0;
+                wvLog("high resolution off for this preset: %.1f ms/frame at %dx%d",
+                      _renderMsAvg, _host.current().w, _host.current().h);
+            }
+        } else {
+            _overBudgetFrames = 0;
+        }
+    }
 
     // Profiling accumulators (ms), reported once a second. The tick-interval
     // histogram tells whether the display link is actually firing per vsync.

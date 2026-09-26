@@ -4,7 +4,7 @@
 # on failure. Binaries and rendered PNGs land in build/cmake/.
 #
 #   tools/run-tests.sh                 # configure + build + all tests
-#   tools/run-tests.sh eel beat        # a subset (ctest -R names: eel fft beat effects gallery avs picture)
+#   tools/run-tests.sh eel beat        # a subset (ctest -R names: eel fft beat effects gallery avs picture draw)
 #   tools/run-tests.sh local           # also render the local classic set, if present
 #   tools/run-tests.sh corpus          # also sweep the whole local archive (long)
 #

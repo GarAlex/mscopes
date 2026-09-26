@@ -27,6 +27,11 @@ final class PictureModel: ObservableObject {
     @Published var scanlines: Double { didSet { engine.scanlines = Float(scanlines); save() } }
     @Published var reactToBeat: Bool { didSet { engine.pictureReactsToBeat = reactToBeat; save() } }
     @Published var sharpScaling: Bool { didSet { engine.sharpScaling = sharpScaling; save() } }
+    // Quality applied while drawing (LineMode.h): smooth lines, high
+    // resolution, and whether classic .avs presets get them too.
+    @Published var smoothLines: Bool { didSet { engine.smoothLines = smoothLines; save() } }
+    @Published var highResolution: Bool { didSet { engine.highResolution = highResolution; save() } }
+    @Published var classicEnhanced: Bool { didSet { engine.classicEnhanced = classicEnhanced; save() } }
     @Published var lastError: String?
 
     private var customLookPath: String?
@@ -44,6 +49,9 @@ final class PictureModel: ObservableObject {
         scanlines = d.object(forKey: "picture.scanlines") as? Double ?? 0
         reactToBeat = d.object(forKey: "picture.reactToBeat") as? Bool ?? false
         sharpScaling = d.object(forKey: "picture.sharpScaling") as? Bool ?? true
+        smoothLines = d.object(forKey: "picture.smoothLines") as? Bool ?? true
+        highResolution = d.object(forKey: "picture.highResolution") as? Bool ?? true
+        classicEnhanced = d.object(forKey: "picture.classicEnhanced") as? Bool ?? false
         customLookPath = d.string(forKey: "picture.customLookPath")
 
         // didSet doesn't run during init: push everything once.
@@ -59,6 +67,9 @@ final class PictureModel: ObservableObject {
         engine.scanlines = Float(scanlines)
         engine.pictureReactsToBeat = reactToBeat
         engine.sharpScaling = sharpScaling
+        engine.smoothLines = smoothLines
+        engine.highResolution = highResolution
+        engine.classicEnhanced = classicEnhanced
         loading = false
         applyLook()
     }
@@ -97,6 +108,7 @@ final class PictureModel: ObservableObject {
     func reset() {
         look = 0; strength = 1; grain = 0; vignette = 0; glow = 0; scanlines = 0
         reactToBeat = false; sharpScaling = true
+        smoothLines = true; highResolution = true; classicEnhanced = false
     }
 
     private func applyLook() {
@@ -115,6 +127,9 @@ final class PictureModel: ObservableObject {
         defaults.set(scanlines, forKey: "picture.scanlines")
         defaults.set(reactToBeat, forKey: "picture.reactToBeat")
         defaults.set(sharpScaling, forKey: "picture.sharpScaling")
+        defaults.set(smoothLines, forKey: "picture.smoothLines")
+        defaults.set(highResolution, forKey: "picture.highResolution")
+        defaults.set(classicEnhanced, forKey: "picture.classicEnhanced")
         defaults.set(customLookPath, forKey: "picture.customLookPath")
     }
 }

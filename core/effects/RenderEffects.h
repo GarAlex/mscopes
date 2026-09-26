@@ -142,6 +142,8 @@ private:
     double _dir[2]= {-1.0, 1.0};
     int    _lx[2][2] = {{0,0},{0,0}};   // [point 0/1][channel]
     int    _ly[2][2] = {{0,0},{0,0}};
+    float  _flx[2][2] = {{0,0},{0,0}};  // the same, unrounded (smooth drawing)
+    float  _fly[2][2] = {{0,0},{0,0}};
     bool   _hasLast[2] = {false, false};
 };
 

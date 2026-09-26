@@ -150,6 +150,9 @@ void SimpleScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     if (W <= 1 || H == 0) return;
     const int m   = std::clamp((int)mode, 0, 4);
     const int pos = std::clamp((int)position, 0, 2);   // 0 top, 1 center, 2 bottom
+    // Smooth: sub-pixel positions (integer columns are pixel indices, so
+    // their centres are +0.5) and a segment every two pixels.
+    const bool smooth = drawQuality().smooth;
 
     const int nCh = std::max(1, std::min(2, a.numWaveformChannels ? a.numWaveformChannels : 2));
     for (int ch = 0; ch < nCh; ++ch) {
@@ -165,7 +168,28 @@ void SimpleScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
                 float v01 = sampleWave(a, ch, t * (kWaveformSamples - 1)) * 0.5f + 0.5f;
                 return yh + yOff + (int)(v01 * (H / 2));
             };
-            if (m == 1) {              // dots
+            auto waveYf = [&](float t) {
+                float v01 = sampleWave(a, ch, t * (kWaveformSamples - 1)) * 0.5f + 0.5f;
+                return (float)(yh + yOff) + v01 * (float)(H / 2);
+            };
+            if (smooth && m == 1) {
+                for (int x = 0; x < W; ++x)
+                    putDotQ(cur, x + 0.5f, waveYf((float)x / (W - 1)), r, g, b);
+            } else if (smooth && m == 0) {
+                const int N = std::max(2, W / 2);
+                float lx = 0.5f, ly = waveYf(0.f), llx = lx, lly = ly;
+                for (int i = 1; i < N; ++i) {
+                    float t = (float)i / (N - 1);
+                    float ox = 0.5f + t * (W - 1), oy = waveYf(t);
+                    drawLineQ(cur, lx, ly, ox, oy, r, g, b, 0,
+                              i == 1 || sharpTurn(llx, lly, lx, ly, ox, oy), i == N - 1);
+                    llx = lx; lly = ly; lx = ox; ly = oy;
+                }
+            } else if (smooth) {
+                const float ys = (float)(yh + yOff + H / 4) - 0.5f;
+                for (int x = 0; x < W; ++x)
+                    drawLineQ(cur, x + 0.5f, ys, x + 0.5f, waveYf((float)x / (W - 1)), r, g, b);
+            } else if (m == 1) {       // dots
                 for (int x = 0; x < W; ++x)
                     putLinePixel(cur, x, waveY((float)x / (W - 1)), r, g, b);
             } else if (m == 0) {       // lines (orig: 288 segments; we span 512 samples)
@@ -193,7 +217,24 @@ void SimpleScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
                 float v = sampleSpec(a, ch, t * binSpan);
                 return base + yOff + (int)(dir * v * (H / 2));
             };
-            if (m == 4) {              // dots
+            auto specYf = [&](float t) {
+                float v = sampleSpec(a, ch, t * binSpan);
+                return (float)(base + yOff) + 0.5f + dir * v * (float)(H / 2);
+            };
+            if (smooth && m == 4) {
+                for (int x = 0; x < W; ++x)
+                    putDotQ(cur, x + 0.5f, specYf((float)x / (W - 1)), r, g, b);
+            } else if (smooth) {
+                const int N = std::max(2, W / 2);
+                float lx = 0.5f, ly = specYf(0.f), llx = lx, lly = ly;
+                for (int i = 1; i < N; ++i) {
+                    float t = (float)i / (N - 1);
+                    float ox = 0.5f + t * (W - 1), oy = specYf(t);
+                    drawLineQ(cur, lx, ly, ox, oy, r, g, b, 0,
+                              i == 1 || sharpTurn(llx, lly, lx, ly, ox, oy), i == N - 1);
+                    llx = lx; lly = ly; lx = ox; ly = oy;
+                }
+            } else if (m == 4) {       // dots
                 for (int x = 0; x < W; ++x)
                     putLinePixel(cur, x, specY((float)x / (W - 1)), r, g, b);
             } else {                   // lines (orig: 200 segments)
@@ -235,6 +276,26 @@ void RingEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     };
 
     const int passes = std::clamp((int)thickness, 1, 4);
+    if (drawQuality().smooth) {
+        for (int pass = 0; pass < passes; ++pass) {
+            const float rad = sizePx + pass;
+            const float ox = cx + 0.5f, oy = cy + 0.5f;
+            double ang = 0.0;
+            float s0 = sca(0);
+            float lx = ox + (float)(std::cos(ang) * rad * s0), ly = oy + (float)(std::sin(ang) * rad * s0);
+            float llx = lx, lly = ly;
+            for (int q = 1; q <= 80; ++q) {
+                ang -= kPi * 2.0 / 80.0;
+                float s = sca(q);
+                float tx = ox + (float)(std::cos(ang) * rad * s), ty = oy + (float)(std::sin(ang) * rad * s);
+                // closed loop: the first segment's round start cap closes it
+                drawLineQ(cur, lx, ly, tx, ty, r, g, b, 0,
+                          q == 1 || sharpTurn(llx, lly, lx, ly, tx, ty), false);
+                llx = lx; lly = ly; lx = tx; ly = ty;
+            }
+        }
+        return;
+    }
     for (int pass = 0; pass < passes; ++pass) {
         const float rad = sizePx + pass;
         double ang = 0.0;
@@ -270,6 +331,7 @@ void OscStarEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         double c = std::cos(_rot + q * (kPi * 2.0 / 5.0));
         double p = 0.0;
         int lx = cx, ly = H / 2;
+        float flx = cx + 0.5f, fly = H / 2 + 0.5f, pflx = flx, pfly = fly;
         int t = 64;
         double dp = sizePx / 64.0;
         double dfactor = 1.0 / 1024.0;
@@ -277,10 +339,19 @@ void OscStarEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
             // orig: ale = ((fa^128)-128) * dfactor * hw  (signed byte)
             double ale = a.waveform[0][ii & (kWaveformSamples - 1)] * 128.0 * dfactor * sizePx;
             ++ii;
-            int x = cx + (int)(c * p) - (int)(s * ale);
-            int y = H / 2 + (int)(s * p) + (int)(c * ale);
-            drawLine(cur, x, y, lx, ly, r, g, b);
-            lx = x; ly = y;
+            if (drawQuality().smooth) {
+                // sub-pixel star arms; flx/fly track the unrounded previous point
+                float fx = cx + 0.5f + (float)(c * p - s * ale);
+                float fy = H / 2 + 0.5f + (float)(s * p + c * ale);
+                drawLineQ(cur, flx, fly, fx, fy, r, g, b, 0,
+                          t == 63 || sharpTurn(pflx, pfly, flx, fly, fx, fy), t == 0);
+                pflx = flx; pfly = fly; flx = fx; fly = fy;
+            } else {
+                int x = cx + (int)(c * p) - (int)(s * ale);
+                int y = H / 2 + (int)(s * p) + (int)(c * ale);
+                drawLine(cur, x, y, lx, ly, r, g, b);
+                lx = x; ly = y;
+            }
             p += dp;
             dfactor -= ((1.0 / 1024.0) - (1.0 / 128.0)) / 64.0;  // deflection grows toward the tip
         }
@@ -321,6 +392,20 @@ void RotStarEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         const double vh = H / 8.0 * (s + 9.f) / 88.0;
 
         double r2 = -_rot;
+        if (drawQuality().smooth) {
+            const float fax = (float)(std::cos(_rot) * W / 4.0) * (c == 1 ? -1.f : 1.f);
+            const float fby = (float)(std::sin(_rot) * H / 4.0) * (c == 1 ? -1.f : 1.f);
+            const float ox = W / 2 + 0.5f + fax, oy = H / 2 + 0.5f + fby;
+            float flx = ox + (float)(std::cos(r2) * vw), fly = oy + (float)(std::sin(r2) * vh);
+            r2 += kPi * 4.0 / 5.0;
+            for (int t = 0; t < 5; ++t) {
+                float nx = ox + (float)(std::cos(r2) * vw), ny = oy + (float)(std::sin(r2) * vh);
+                r2 += kPi * 4.0 / 5.0;
+                drawLineQ(cur, flx, fly, nx, ny, cr, cg, cb, 0, true, t == 4);   // star points: always a round join
+                flx = nx; fly = ny;
+            }
+            continue;
+        }
         int lx = W / 2 + ax + (int)(std::cos(r2) * vw);
         int ly = H / 2 + by + (int)(std::sin(r2) * vh);
         r2 += kPi * 4.0 / 5.0;
@@ -366,7 +451,16 @@ void BassSpinEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         const int xp = (int)(std::cos(_rv[t]) * sizeF);
         const int yp = (int)(std::sin(_rv[t]) * sizeF);
 
-        if (!filled) {
+        if (!filled && drawQuality().smooth) {
+            const float fxp = (float)(std::cos(_rv[t]) * sizeF), fyp = (float)(std::sin(_rv[t]) * sizeF);
+            const float ox = cx + 0.5f, oy = H / 2 + 0.5f;
+            if (_hasLast[t])
+                drawLineQ(cur, _flx[0][t], _fly[0][t], ox + fxp, oy + fyp, cr, cg, cb);
+            drawLineQ(cur, ox, oy, ox + fxp, oy + fyp, cr, cg, cb);
+            if (_hasLast[t])
+                drawLineQ(cur, _flx[1][t], _fly[1][t], ox - fxp, oy - fyp, cr, cg, cb);
+            drawLineQ(cur, ox, oy, ox - fxp, oy - fyp, cr, cg, cb);
+        } else if (!filled) {
             if (_hasLast[t])
                 drawLine(cur, _lx[0][t], _ly[0][t], xp + cx, yp + H / 2, cr, cg, cb);
             drawLine(cur, cx, H / 2, cx + xp, H / 2 + yp, cr, cg, cb);
@@ -387,6 +481,11 @@ void BassSpinEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         }
         _lx[0][t] = xp + cx;  _ly[0][t] = yp + H / 2;
         _lx[1][t] = cx - xp;  _ly[1][t] = H / 2 - yp;
+        {
+            const float fxp = (float)(std::cos(_rv[t]) * sizeF), fyp = (float)(std::sin(_rv[t]) * sizeF);
+            _flx[0][t] = cx + 0.5f + fxp;  _fly[0][t] = H / 2 + 0.5f + fyp;
+            _flx[1][t] = cx + 0.5f - fxp;  _fly[1][t] = H / 2 + 0.5f - fyp;
+        }
         _hasLast[t] = true;
     }
 }
@@ -411,10 +510,16 @@ void DotGridEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     _xp = wrap(_xp);
     _yp = wrap(_yp);
 
-    const int sx = (int)_xp, sy = (int)_yp;
-    for (int y = sy; y < H; y += sp)
-        for (int x = sx; x < W; x += sp)
-            putLinePixel(cur, x, y, r, g, b);
+    if (drawQuality().smooth) {           // the grid scrolls at sub-pixel speed
+        for (float y = _yp; y < H; y += sp)
+            for (float x = _xp; x < W; x += sp)
+                putDotQ(cur, x, y, r, g, b);
+    } else {
+        const int sx = (int)_xp, sy = (int)_yp;
+        for (int y = sy; y < H; y += sp)
+            for (int x = sx; x < W; x += sp)
+                putLinePixel(cur, x, y, r, g, b);
+    }
 
     _xp += speedX;
     _yp += speedY;
@@ -499,10 +604,15 @@ void DotPlaneEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
             matrixApply(transform, curY, 64.0f - _height[idx], curX, &x, &y, &z);
             if (z > 0.0000001f) {
                 z = zoom / z;
-                int sx = (int)(x * z) + W / 2;
-                int sy = (int)(y * z) + H / 2;
-                putLinePixel(cur, sx, sy, _color[idx][0] * gain, _color[idx][1] * gain,
-                               _color[idx][2] * gain);
+                if (drawQuality().smooth) {
+                    putDotQ(cur, x * z + W / 2 + 0.5f, y * z + H / 2 + 0.5f,
+                            _color[idx][0] * gain, _color[idx][1] * gain, _color[idx][2] * gain);
+                } else {
+                    int sx = (int)(x * z) + W / 2;
+                    int sy = (int)(y * z) + H / 2;
+                    putLinePixel(cur, sx, sy, _color[idx][0] * gain, _color[idx][1] * gain,
+                                   _color[idx][2] * gain);
+                }
             }
             curY += gridStep;
             idx += direction;
@@ -580,9 +690,13 @@ void DotFountainEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         matrixApply(transform, p.ax * p.radius, p.height, p.ay * p.radius, &x, &y, &z);
         if (z > 0.0000001f) {
             z = zoom / z;
-            int sx = (int)(x * z) + W / 2;
-            int sy = (int)(y * z) + H / 2;
-            putLinePixel(cur, sx, sy, p.r * gain, p.g * gain, p.b * gain);
+            if (drawQuality().smooth) {
+                putDotQ(cur, x * z + W / 2 + 0.5f, y * z + H / 2 + 0.5f, p.r * gain, p.g * gain, p.b * gain);
+            } else {
+                int sx = (int)(x * z) + W / 2;
+                int sy = (int)(y * z) + H / 2;
+                putLinePixel(cur, sx, sy, p.r * gain, p.g * gain, p.b * gain);
+            }
         }
     }
 
@@ -676,6 +790,15 @@ void MovingParticleEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         }
     };
 
+    if (drawQuality().smooth) {
+        // A sub-pixel disc with an anti-aliased edge, sized for the output.
+        const int mode = bm == 0 ? 0 : bm == 2 ? 3 : 1;     // replace, 50/50, additive
+        const float fx = (float)(_p[0] * reach) + W / 2 + 0.5f;
+        const float fy = (float)(_p[1] * reach) + H / 2 + 0.5f;
+        const float rad = std::max(1, sz) * 0.5f * std::max(0.25f, drawQuality().widthScale);
+        plotDotAA(cur, fx, fy, rad, colR, colG, colB, mode, 1.f);
+        return;
+    }
     if (sz <= 1) { put(xp, yp); return; }
 
     // filled circle, scanline by scanline (original's exact shape math)

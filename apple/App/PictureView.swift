@@ -45,9 +45,25 @@ struct PictureControls: View {
 
             Divider().padding(.vertical, 2)
             Text("Quality").font(.caption).foregroundStyle(.secondary)
+            Toggle("Smooth lines", isOn: $picture.smoothLines)
+                .font(.caption)
+                .help("Anti-aliased scopes, lines and dots at sub-pixel precision — drawn smooth, so trails stay smooth too")
+            Toggle("High resolution", isOn: $picture.highResolution)
+                .font(.caption)
+                .help("Render at the screen's full resolution when the preset keeps 60 fps there")
             Toggle("Sharp scaling", isOn: $picture.sharpScaling)
                 .font(.caption)
                 .help("Crisper upscaling when the picture is larger than the render size")
+            HStack(spacing: 8) {
+                Text("Classic presets").font(.caption)
+                Picker("", selection: $picture.classicEnhanced) {
+                    Text("Authentic").tag(false)
+                    Text("Enhanced").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            .help("Authentic: .avs presets render exactly as in AVS. Enhanced: they get smooth lines and high resolution too")
 
             HStack {
                 Spacer()

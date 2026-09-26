@@ -103,10 +103,13 @@ void ParticleSystemEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         float fade = p.life / p.maxLife;
         fade = fade * fade * (3.f - 2.f * fade);         // ease out
         hue2rgb(p.hue, rgb);
-        int cx = (int)p.x, cy = (int)p.y;
-        for (int dy = -rad; dy <= rad; ++dy)
-            for (int dx = -rad; dx <= rad; ++dx) {
-                float fall = std::exp(-(float)(dx * dx + dy * dy) * inv2s2) * fade;
+        // Sub-pixel: the gaussian is evaluated at each pixel centre's true
+        // distance from the particle, so slow particles glide, not step.
+        int cx = (int)std::floor(p.x), cy = (int)std::floor(p.y);
+        for (int dy = -rad; dy <= rad + 1; ++dy)
+            for (int dx = -rad; dx <= rad + 1; ++dx) {
+                const float ex = cx + dx + 0.5f - p.x, ey = cy + dy + 0.5f - p.y;
+                float fall = std::exp(-(ex * ex + ey * ey) * inv2s2) * fade;
                 if (fall < 0.02f) continue;
                 cur.addClamped(cx + dx, cy + dy,
                                rgb[0] * fall, rgb[1] * fall, rgb[2] * fall);
