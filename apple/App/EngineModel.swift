@@ -9,6 +9,9 @@ import Combine
 @MainActor
 final class EngineModel: ObservableObject {
     let engine = VizEngine()
+    /// Looks and quality (PictureModel.swift); created with the model so the
+    /// remembered settings reach the engine at launch.
+    let picture: PictureModel
 
     // Live status (refreshed by a display-linked timer).
     @Published var capturing = false { didSet { if capturing != oldValue { syncDockTile() } } }
@@ -72,6 +75,7 @@ final class EngineModel: ObservableObject {
     private var poll: Timer?
 
     init() {
+        picture = PictureModel(engine: engine)
         presetNames = engine.presetNames.enumerated().map { i, raw in
             let p = raw.split(separator: "|").map(String.init)
             return PresetEntry(id: i, name: p.first ?? raw,

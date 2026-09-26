@@ -11,6 +11,7 @@
 
 #include "VizFrame.h"
 #include "GpuFx.h"
+#include "Picture.h"
 #import  "Analyzer.h"
 #import  "SystemAudioTap.h"
 #include <os/log.h>
@@ -63,6 +64,7 @@ static void wvOnSIGUSR2(int)
 @public
     viz::VizFrame frame;             // latest audio frame (for the HUD readout)
     const viz::Framebuffer* fb;      // effect-host output to present (owned by engine)
+    const viz::PictureSettings* pic; // display-stage looks (owned by engine; may be null)
     BOOL          showHUD;
     double        blitMs;            // last present/blit cost (profiling)
 @private
@@ -152,7 +154,9 @@ static void wvOnSIGUSR2(int)
     CFTimeInterval t0 = CACurrentMediaTime();
     if (_metal) {
         if (!self.layer) return;
-        viz::gpu::present(*fb, (__bridge void*)self.layer);
+        viz::PictureSettings s = pic ? *pic : viz::PictureSettings();
+        s.pointScale = (float)self.layer.contentsScale;
+        viz::gpu::present(*fb, (__bridge void*)self.layer, s);
         [self updateHUD];
     } else {
         [self setNeedsDisplay:YES];
@@ -200,6 +204,13 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
                                    CVOptionFlags, CVOptionFlags*, void* ctx);
 
 @implementation VizEngine {
+    // Picture (display-stage looks, Picture.h): applied only when the frame
+    // is drawn to the window, never written into the frame presets keep.
+    viz::PictureSettings  _pic;
+    viz::LookTable        _builtinLook;    // the selected built-in look, baked
+    viz::LookTable        _customLook;     // a loaded .cube look
+    NSInteger             _lookIndex;      // 0 = Off, -1 = custom
+    NSString*             _customLookName;
     viz::Analyzer         _analyzer;
     // One tap per process producing output (a tap that mixes several
     // processes drops out on macOS 26 — see SystemAudioTap.mm); each feeds
@@ -270,6 +281,8 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
         _view = [[WVRenderView alloc] initWithFrame:NSMakeRect(0, 0, 640, 360)];
         _view->showHUD = NO;
         _sensitivity = 1.0f;
+        _lookIndex = 0;
+        _view->pic = &_pic;
         _aspectMode = 1;               // fill: shapes stay round fullscreen
         _cbs = 0;
         gEngineForSignals = self;
@@ -324,6 +337,54 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
 - (unsigned long long)audioCallbacks { return _cbs.load(); }
 
 - (void)setShowHUD:(BOOL)showHUD { _showHUD = showHUD; _view->showHUD = showHUD; }
+
+// ---- Picture ------------------------------------------------------------
+- (NSArray<NSString *> *)lookNames
+{
+    NSMutableArray* a = [NSMutableArray array];
+    for (const auto& n : viz::lookNames()) [a addObject:@(n.c_str())];
+    return a;
+}
+- (NSInteger)lookIndex { return _lookIndex; }
+- (void)setLookIndex:(NSInteger)i
+{
+    if (i == -1) {
+        if (_customLook.empty()) return;          // nothing loaded: keep the current look
+        _lookIndex = -1;
+        _pic.look = &_customLook;
+        return;
+    }
+    if (!viz::buildLook((int)i, _builtinLook)) return;
+    _lookIndex = i;
+    _pic.look = (i == 0) ? nullptr : &_builtinLook;
+}
+- (nullable NSString *)loadCustomLookAtPath:(NSString *)path
+{
+    std::string err;
+    viz::LookTable t;
+    if (!viz::loadCubeFile(path.fileSystemRepresentation, t, &err))
+        return [NSString stringWithUTF8String:err.c_str()];
+    _customLook = std::move(t);
+    _customLookName = [[path lastPathComponent] stringByDeletingPathExtension];
+    _lookIndex = -1;
+    _pic.look = &_customLook;
+    return nil;
+}
+- (nullable NSString *)customLookName { return _customLook.empty() ? nil : _customLookName; }
+- (float)lookStrength { return _pic.lookStrength; }
+- (void)setLookStrength:(float)v { _pic.lookStrength = std::clamp(v, 0.f, 1.f); }
+- (float)grain { return _pic.grain; }
+- (void)setGrain:(float)v { _pic.grain = std::clamp(v, 0.f, 1.f); }
+- (float)vignette { return _pic.vignette; }
+- (void)setVignette:(float)v { _pic.vignette = std::clamp(v, 0.f, 1.f); }
+- (float)glow { return _pic.glow; }
+- (void)setGlow:(float)v { _pic.glow = std::clamp(v, 0.f, 1.f); }
+- (float)scanlines { return _pic.scanlines; }
+- (void)setScanlines:(float)v { _pic.scanlines = std::clamp(v, 0.f, 1.f); }
+- (BOOL)pictureReactsToBeat { return _pic.beatReactive; }
+- (void)setPictureReactsToBeat:(BOOL)b { _pic.beatReactive = b; }
+- (BOOL)sharpScaling { return _pic.sharpScaling; }
+- (void)setSharpScaling:(BOOL)b { _pic.sharpScaling = b; }
 
 - (NSArray<NSString *> *)presetNames
 {
@@ -1012,6 +1073,9 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     _analyzer.analyze(f);
     _bpm = f.bpm;
     _beatLevel = f.beat ? 1.f : _beatLevel * 0.85f;   // ~200 ms visible flash
+    _pic.beat = _beatLevel;
+    _pic.bass = std::min(1.f, f.bass * 1.6f);
+    _pic.frame++;
 
     // Apply user sensitivity (SwiftUI-controlled) — real control-path demo.
     if (s != 1.0f) {

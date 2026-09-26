@@ -14,7 +14,8 @@ void flush() {}
 void invalidateResident(const void*) {}
 void syncToCpu(Framebuffer&) {}
 void syncToCpuForRead(const Framebuffer&) {}
-bool present(const Framebuffer&, void*) { return false; }
+bool present(const Framebuffer&, void*, const PictureSettings&) { return false; }
+bool renderPicture(const Framebuffer&, const PictureSettings&, int, int, std::vector<uint8_t>&) { return false; }
 void lastPresentTimes(double* a, double* b, double* c) { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; }
 
 void movement(Framebuffer&, int, bool, bool, int) {}

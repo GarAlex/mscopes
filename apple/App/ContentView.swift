@@ -61,6 +61,7 @@ struct ContentView: View {
         .onHover { hoveringVisual = $0 }
         .contextMenu {
             Button("Next Random Preset") { model.shuffleNext() }
+            LookMenu(picture: model.picture)
             Divider()
             if widget {
                 Button("Leave Widget Mode") { model.widgetMode = false }

@@ -97,6 +97,23 @@ NS_ASSUME_NONNULL_BEGIN
                          beatScript:(NSString *)b pointScript:(NSString *)p;
 - (void)setParamForEffectAt:(NSInteger)index key:(NSString *)key value:(float)value;
 
+/// Picture: display-stage looks and quality (core/effects/Picture.h). They
+/// act only when the finished frame is drawn to the window and are never
+/// written into the frame a preset feeds forward.
+@property (nonatomic, readonly) NSArray<NSString *> *lookNames;   // index 0 = "Off"
+@property (nonatomic) NSInteger lookIndex;          // -1 = the loaded .cube look
+@property (nonatomic) float lookStrength;           // 0..1
+@property (nonatomic) float grain;                  // 0..1
+@property (nonatomic) float vignette;               // 0..1
+@property (nonatomic) float glow;                   // 0..1
+@property (nonatomic) float scanlines;              // 0..1
+@property (nonatomic) BOOL pictureReactsToBeat;     // grain and glow breathe with the music
+@property (nonatomic) BOOL sharpScaling;            // de-ringed bicubic upscale (default YES)
+/// Load a .cube look. On success the look becomes the current one (lookIndex
+/// -1) and nil is returned; otherwise a short error message.
+- (nullable NSString *)loadCustomLookAtPath:(NSString *)path;
+@property (nonatomic, readonly, nullable) NSString *customLookName;
+
 /// Start/stop system-audio capture. Returns NO and sets *error on failure.
 - (BOOL)start:(NSError *_Nullable *_Nullable)error;
 - (void)stop;

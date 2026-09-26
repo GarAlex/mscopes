@@ -4,6 +4,15 @@
 //   vizrender <preset.avs|.json> [--audio track.wav] [--frames N] [--fps 60]
 //             [--size WxH] [--out dir]
 //   vizrender --builtin "<name>"    (or --list to see the built-in presets)
+//   --last        write only the final frame (a still, without filling the disk:
+//                 a 1280x720 sequence is ~1.5 MB per frame)
+//
+// Picture options (the app's display-stage looks, see Picture.h; they need
+// the GPU backend) — any of them routes every frame through the picture
+// pass, at --display size (default: the render size):
+//   --look <name>  --look-strength x  --cube file.cube  --grain x
+//   --vignette x  --glow x  --scanlines x  --beat-reactive  --no-sharp
+//   --display WxH  --list-looks
 //
 // Without --audio it uses the test suite's synthetic signal. With a WAV
 // (PCM 16-bit or float32, any channel count) the real Analyzer + beat
@@ -16,6 +25,8 @@
 #include "AvsPreset.h"
 #include "JsonPreset.h"
 #include "Presets.h"
+#include "Picture.h"
+#include "GpuFx.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -68,6 +79,12 @@ int main(int argc, const char** argv)
 {
     std::string preset, audio, out = "out", builtin;
     int frames = 300, fps = 60, W = 640, H = 360;
+    PictureSettings pic;
+    LookTable lookTable;
+    bool usePicture = false;
+    int DW = 0, DH = 0;
+    bool lastOnly = false;
+    std::string lookName, cubePath;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -81,12 +98,40 @@ int main(int argc, const char** argv)
         else if (a == "--fps") fps = std::max(1, atoi(next()));
         else if (a == "--size") { const char* s = next(); sscanf(s, "%dx%d", &W, &H); }
         else if (a == "--out") out = next();
+        else if (a == "--last") lastOnly = true;
+        else if (a == "--list-looks") { for (const auto& n : lookNames()) printf("%s\n", n.c_str()); return 0; }
+        else if (a == "--look") { lookName = next(); usePicture = true; }
+        else if (a == "--cube") { cubePath = next(); usePicture = true; }
+        else if (a == "--look-strength") { pic.lookStrength = (float)atof(next()); usePicture = true; }
+        else if (a == "--grain") { pic.grain = (float)atof(next()); usePicture = true; }
+        else if (a == "--vignette") { pic.vignette = (float)atof(next()); usePicture = true; }
+        else if (a == "--glow") { pic.glow = (float)atof(next()); usePicture = true; }
+        else if (a == "--scanlines") { pic.scanlines = (float)atof(next()); usePicture = true; }
+        else if (a == "--beat-reactive") { pic.beatReactive = true; usePicture = true; }
+        else if (a == "--no-sharp") { pic.sharpScaling = false; usePicture = true; }
+        else if (a == "--display") { const char* s = next(); sscanf(s, "%dx%d", &DW, &DH); usePicture = true; }
         else if (a[0] == '-') { fprintf(stderr, "unknown option %s\n", a.c_str()); return 1; }
         else preset = a;
     }
     if (preset.empty() && builtin.empty()) {
         fprintf(stderr, "usage: vizrender <preset.avs|.json> | --builtin <name> | --list  [--audio t.wav] [--frames N] [--fps 60] [--size WxH] [--out dir]\n");
         return 1;
+    }
+
+    if (usePicture) {
+        if (!gpu::available()) { fprintf(stderr, "vizrender: picture options need the GPU backend\n"); return 1; }
+        if (!lookName.empty()) {
+            int idx = -1;
+            for (size_t k = 0; k < lookNames().size(); ++k) if (lookNames()[k] == lookName) idx = (int)k;
+            if (idx < 0) { fprintf(stderr, "vizrender: no look named \"%s\" (see --list-looks)\n", lookName.c_str()); return 1; }
+            buildLook(idx, lookTable);
+        }
+        if (!cubePath.empty()) {
+            std::string e;
+            if (!loadCubeFile(cubePath, lookTable, &e)) { fprintf(stderr, "vizrender: %s\n", e.c_str()); return 1; }
+        }
+        pic.look = lookTable.empty() ? nullptr : &lookTable;
+        if (DW <= 0 || DH <= 0) { DW = W; DH = H; }
     }
 
     EffectHost host;
@@ -123,6 +168,9 @@ int main(int argc, const char** argv)
     EffectContext ctx;
     ctx.dt = 1.0 / fps;
     size_t cursor = 0;
+    float beatLevel = 0.f;
+    std::vector<uint8_t> rgba;
+    Framebuffer shown;
     for (int i = 0; i < frames; ++i) {
         if (haveAudio) {
             size_t hop = (size_t)wav.rate / fps;
@@ -135,9 +183,22 @@ int main(int argc, const char** argv)
         }
         ctx.frame = i; ctx.time = i / (double)fps;
         host.renderFrame(f, ctx);
+        if (lastOnly && i != frames - 1) continue;
         char name[64];
         snprintf(name, sizeof name, "/frame_%05d.png", i);
-        if (!test::writePng(host.currentSynced(), out + name)) {
+        const Framebuffer* toWrite = &host.currentSynced();
+        if (usePicture) {
+            beatLevel = f.beat ? 1.f : beatLevel * 0.85f;
+            pic.beat = beatLevel; pic.bass = std::min(1.f, f.bass * 1.6f); pic.frame = (uint32_t)i;
+            if (!gpu::renderPicture(*toWrite, pic, DW, DH, rgba)) {
+                fprintf(stderr, "vizrender: picture pass failed\n");
+                return 3;
+            }
+            shown.resize(DW, DH);
+            for (size_t k = 0; k < rgba.size(); ++k) shown.px[k] = rgba[k] * (1.f / 255.f);
+            toWrite = &shown;
+        }
+        if (!test::writePng(*toWrite, out + name)) {
             fprintf(stderr, "vizrender: cannot write %s%s (does the directory exist?)\n", out.c_str(), name);
             return 3;
         }

@@ -9,6 +9,7 @@ import SwiftUI
 
 struct HeaderBar: View {
     @EnvironmentObject var model: EngineModel
+    @Environment(\.openWindow) private var openWindow
     let onFullscreen: () -> Void
 
     static let height: CGFloat = 38
@@ -33,6 +34,10 @@ struct HeaderBar: View {
                 HeaderButton(symbol: model.showSidebar ? "sidebar.trailing" : "sidebar.leading",
                              help: model.showSidebar ? "Hide the sidebar (⌃⌘S)" : "Show the sidebar (⌃⌘S)") {
                     model.showSidebar.toggle()
+                }
+                HeaderButton(symbol: "camera.filters",
+                             help: "Picture: looks, glow, grain and quality (⌥⌘P)") {
+                    openWindow(id: PictureWindow.windowID)
                 }
                 HeaderButton(symbol: "pip",
                              help: "Widget mode: a small always-on-top window with just the visuals (⌘⇧W)") {
@@ -94,9 +99,13 @@ struct HeaderButton: View {
 /// Hover-only controls for widget mode: leave it, or close the window.
 struct WidgetControls: View {
     @EnvironmentObject var model: EngineModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 6) {
+            HeaderButton(symbol: "camera.filters", help: "Picture (⌥⌘P)") {
+                openWindow(id: PictureWindow.windowID)
+            }
             HeaderButton(symbol: "arrow.down.right.and.arrow.up.left",
                          help: "Back to the full window (⌘⇧W)") {
                 model.widgetMode = false

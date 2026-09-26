@@ -4,3 +4,5 @@
 # gitignored is already excluded because the snapshot is taken from HEAD's
 # tree, not the working directory.
 core/effects/PORTING.md
+# Design notes and plans stay local (see the project policy).
+docs/notes/

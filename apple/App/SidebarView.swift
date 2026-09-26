@@ -16,6 +16,7 @@ struct SidebarView: View {
                 MusicPluginSection()
                 LevelsView(levels: model.levels)
                 ControlsSection()
+                PictureSection()
                 PresetSection()
                 AlbumsSection()
                 MacroKnobsSection()

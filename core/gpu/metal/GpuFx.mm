@@ -691,23 +691,187 @@ kernel void fx_blend(texture2d<float, access::read> dsrc [[texture(0)]],
 }
 )MSL";
 
-// Presentation shaders: one oversized triangle covers the drawable; uv is
-// derived from clip space so the framebuffer's bottom-up row order lands the
-// right way up without a flip.
-static const char* kPresentShaders = R"MSL(
+// Picture pass (Picture.h). One oversized triangle covers the drawable; uv
+// is derived from clip space so the framebuffer's bottom-up row order lands
+// the right way up without a flip. The glow is a small pyramid computed from
+// the frame into private textures; nothing here writes the frame itself.
+static const char* kPictureShaders = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
+
 struct VOut { float4 pos [[position]]; float2 uv; };
-vertex VOut present_vs(uint vid [[vertex_id]])
+vertex VOut pic_vs(uint vid [[vertex_id]])
 {
     float2 p = float2(vid == 2 ? 3.0 : -1.0, vid == 1 ? 3.0 : -1.0);
     VOut o; o.pos = float4(p, 0.0, 1.0); o.uv = p * 0.5 + 0.5; return o;
 }
-fragment float4 present_fs(VOut in [[stage_in]], texture2d<float> src [[texture(0)]])
+
+struct PicU {
+    float2 srcSize, dstSize;
+    float glow, lookStrength, lookSize, vignette;
+    float scanlines, grain, bass, beat;
+    float frame, pointScale, sharp, dither;
+    float hasGlow, hasLook, beatReactive, glowLevels;
+};
+
+static uint hashu(uint x)
 {
-    constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float4 c = src.sample(s, in.uv);
-    return float4(clamp(c.rgb, 0.0, 1.0), 1.0);
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+}
+static float rnd(uint2 p, uint seed)
+{
+    return float(hashu(p.x * 1973u + p.y * 9277u + seed * 26699u + 0x9e3779b9u)) * (1.0 / 4294967296.0);
+}
+
+// Bicubic Catmull-Rom from 9 bilinear taps, clamped to the 2x2 texels
+// around the sample point so hard edges don't ring (no dark halo, no
+// bright overshoot next to a thin line).
+static float3 sampleSharp(texture2d<float> t, float2 uv, float2 size)
+{
+    constexpr sampler lin(filter::linear, address::clamp_to_edge);
+    constexpr sampler nrst(filter::nearest, address::clamp_to_edge);
+    float2 sp = uv * size;
+    float2 t1 = floor(sp - 0.5) + 0.5;
+    float2 f = sp - t1;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 t12 = (t1 + w2 / w12) / size;
+    float2 t0 = (t1 - 1.0) / size, t3 = (t1 + 2.0) / size;
+    float3 r = 0.0;
+    r += t.sample(lin, float2(t0.x,  t0.y)).rgb  * (w0.x  * w0.y);
+    r += t.sample(lin, float2(t12.x, t0.y)).rgb  * (w12.x * w0.y);
+    r += t.sample(lin, float2(t3.x,  t0.y)).rgb  * (w3.x  * w0.y);
+    r += t.sample(lin, float2(t0.x,  t12.y)).rgb * (w0.x  * w12.y);
+    r += t.sample(lin, float2(t12.x, t12.y)).rgb * (w12.x * w12.y);
+    r += t.sample(lin, float2(t3.x,  t12.y)).rgb * (w3.x  * w12.y);
+    r += t.sample(lin, float2(t0.x,  t3.y)).rgb  * (w0.x  * w3.y);
+    r += t.sample(lin, float2(t12.x, t3.y)).rgb  * (w12.x * w3.y);
+    r += t.sample(lin, float2(t3.x,  t3.y)).rgb  * (w3.x  * w3.y);
+    float2 a = t1 / size, b = (t1 + 1.0) / size;
+    float3 c0 = t.sample(nrst, a).rgb, c1 = t.sample(nrst, float2(b.x, a.y)).rgb;
+    float3 c2 = t.sample(nrst, float2(a.x, b.y)).rgb, c3 = t.sample(nrst, b).rgb;
+    return clamp(r, min(min(c0, c1), min(c2, c3)), max(max(c0, c1), max(c2, c3)));
+}
+
+// Order: scale → glow → (tone map, phase 3) → look → vignette → grain →
+// scanlines → dither. The look comes after the glow so halos take the look
+// too; vignette before grain because grain sits on the "film".
+fragment float4 pic_fs(VOut in [[stage_in]],
+                       texture2d<float> src [[texture(0)]],
+                       texture2d<float> glowTex [[texture(1)]],
+                       texture3d<float> lut [[texture(2)]],
+                       constant PicU& u [[buffer(0)]])
+{
+    constexpr sampler lin(filter::linear, address::clamp_to_edge);
+    float2 uv = in.uv;
+    bool upscale = u.dstSize.x > u.srcSize.x + 0.5 || u.dstSize.y > u.srcSize.y + 0.5;
+    float3 c = (u.sharp > 0.5 && upscale) ? sampleSharp(src, uv, u.srcSize) : src.sample(lin, uv).rgb;
+    c = max(c, 0.0);
+
+    if (u.hasGlow > 0.5) {
+        float g = u.glow * (1.0 + u.beatReactive * 0.8 * u.bass);
+        // The pyramid sums one copy of the thresholded light per level, each
+        // spread wider; dividing by the depth gives about the source's own
+        // energy, which a small bright feature spreads too thin to see. Full
+        // glow adds several times that, so thin lines and points visibly bloom.
+        c += glowTex.sample(lin, uv).rgb * (g * 7.0 / max(u.glowLevels, 1.0));
+    }
+    c = clamp(c, 0.0, 1.0);
+
+    if (u.hasLook > 0.5) {
+        float n = u.lookSize;
+        float3 lc = lut.sample(lin, c * ((n - 1.0) / n) + 0.5 / n).rgb;
+        c = mix(c, lc, u.lookStrength);
+    }
+
+    if (u.vignette > 0.0) {
+        float aspect = u.dstSize.x / max(u.dstSize.y, 1.0);
+        float2 d = (uv - 0.5) * float2(aspect, 1.0);
+        float r = length(d) / length(float2(aspect, 1.0) * 0.5);   // 0 centre, 1 corner
+        c *= 1.0 - u.vignette * 0.85 * smoothstep(0.3, 1.05, r);
+    }
+
+    uint fr = uint(u.frame);
+    float ps = max(u.pointScale, 1.0);
+    if (u.grain > 0.0) {
+        uint2 cell = uint2(in.pos.xy / ps);                 // one grain per point
+        float n = rnd(cell, fr * 2u + 11u) + rnd(cell, fr * 2u + 12u) - 1.0;
+        float y = dot(c, float3(0.2126, 0.7152, 0.0722));
+        float w = 0.2 + 3.2 * y * (1.0 - y);                 // strongest in the midtones
+        float g = u.grain * (1.0 + u.beatReactive * 0.6 * u.beat);
+        c += n * g * 0.11 * w;
+    }
+
+    if (u.scanlines > 0.0) {
+        float s = 0.5 + 0.5 * cos(in.pos.y / ps * (2.0 * M_PI_F / 3.0));   // 3-point pitch
+        c *= 1.0 - u.scanlines * 0.5 * (1.0 - s);
+    }
+
+    if (u.dither > 0.5) {
+        uint2 px = uint2(in.pos.xy);
+        float n = rnd(px, fr * 3u + 1u) + rnd(px, fr * 3u + 2u) - 1.0;   // triangular, ±1 LSB
+        c += n * (1.0 / 255.0);
+    }
+    return float4(clamp(c, 0.0, 1.0), 1.0);
+}
+
+// ---- glow pyramid: prefilter (soft threshold) → downsample chain → tent
+// upsample-and-add back up. Result: a wide, smooth, energy-sane halo.
+struct GlowU { float2 srcTexel; float threshold; float knee; };
+
+static float3 box5(texture2d<float, access::sample> src, float2 uv, float2 o)
+{
+    constexpr sampler lin(filter::linear, address::clamp_to_edge);
+    return src.sample(lin, uv).rgb * 0.5
+         + (src.sample(lin, uv + float2(-o.x, -o.y)).rgb + src.sample(lin, uv + float2(o.x, -o.y)).rgb
+          + src.sample(lin, uv + float2(-o.x,  o.y)).rgb + src.sample(lin, uv + float2(o.x,  o.y)).rgb) * 0.125;
+}
+
+kernel void pic_prefilter(texture2d<float, access::sample> src [[texture(0)]],
+                          texture2d<float, access::write> dst [[texture(1)]],
+                          constant GlowU& u [[buffer(0)]],
+                          uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    float2 uv = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height());
+    float3 c = clamp(box5(src, uv, u.srcTexel), 0.0, 4.0);
+    float br = max(c.r, max(c.g, c.b));
+    float soft = clamp(br - u.threshold + u.knee, 0.0, 2.0 * u.knee);
+    soft = soft * soft / (4.0 * u.knee + 1e-4);
+    float w = max(soft, br - u.threshold) / max(br, 1e-4);
+    dst.write(float4(c * w, 1.0), g);
+}
+
+kernel void pic_down(texture2d<float, access::sample> src [[texture(0)]],
+                     texture2d<float, access::write> dst [[texture(1)]],
+                     constant GlowU& u [[buffer(0)]],
+                     uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    float2 uv = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height());
+    dst.write(float4(box5(src, uv, u.srcTexel), 1.0), g);
+}
+
+kernel void pic_up(texture2d<float, access::sample> coarse [[texture(0)]],
+                   texture2d<float, access::read> fine [[texture(1)]],
+                   texture2d<float, access::write> dst [[texture(2)]],
+                   constant GlowU& u [[buffer(0)]],
+                   uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    constexpr sampler lin(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height());
+    float2 o = u.srcTexel;
+    float3 s = coarse.sample(lin, uv).rgb * 4.0
+             + (coarse.sample(lin, uv + float2(o.x, 0)).rgb + coarse.sample(lin, uv - float2(o.x, 0)).rgb
+              + coarse.sample(lin, uv + float2(0, o.y)).rgb + coarse.sample(lin, uv - float2(0, o.y)).rgb) * 2.0
+             + (coarse.sample(lin, uv + o).rgb + coarse.sample(lin, uv - o).rgb
+              + coarse.sample(lin, uv + float2(o.x, -o.y)).rgb + coarse.sample(lin, uv + float2(-o.x, o.y)).rgb);
+    dst.write(float4(fine.read(g).rgb + s * (1.0 / 16.0), 1.0), g);
 }
 )MSL";
 
@@ -725,7 +889,19 @@ struct Ctx {
     id<MTLDevice> dev = nil;
     id<MTLCommandQueue> queue = nil;
     NSDictionary<NSString*, id<MTLComputePipelineState>>* pipes = nil;
-    id<MTLRenderPipelineState> presentPipe = nil;   // lazily built by present()
+    // Picture pass (lazily built by present()/renderPicture()).
+    id<MTLLibrary> picLib = nil;
+    id<MTLRenderPipelineState> picPipe = nil;
+    MTLPixelFormat picPipeFormat = MTLPixelFormatInvalid;
+    id<MTLComputePipelineState> picPrefilter = nil, picDown = nil, picUp = nil;
+    static constexpr int kGlowMax = 6;
+    id<MTLTexture> glowDown[kGlowMax] = {};
+    id<MTLTexture> glowUp[kGlowMax] = {};
+    int glowLevels = 0, glowW = 0, glowH = 0;
+    id<MTLTexture> lutTex = nil;
+    uint64_t lutVersion = 0;
+    int lutSize = 0;
+    id<MTLTexture> dummy2D = nil, dummy3D = nil;   // bound when glow/look are off
     bool broken = false;                            // a wrap failed: fall back to CPU paths
 
     // Deferred execution: ops encode into one pending command buffer and
@@ -991,7 +1167,207 @@ void lastPresentTimes(double* u, double* d, double* g)
     if (g) *g = gPresentGpuMs;
 }
 
-bool present(const Framebuffer& fb, void* layerPtr)
+#if __has_feature(objc_arc)
+#define WV_RELEASE(x) ((x) = nil)
+#else
+#define WV_RELEASE(x) do { [(x) release]; (x) = nil; } while (0)
+#endif
+
+// Mirror of the shader's PicU / GlowU (all 4-byte floats; the float2 pairs
+// come first so offsets match Metal's 8-byte alignment).
+struct PicU {
+    float srcW, srcH, dstW, dstH;
+    float glow, lookStrength, lookSize, vignette;
+    float scanlines, grain, bass, beat;
+    float frame, pointScale, sharp, dither;
+    float hasGlow, hasLook, beatReactive, glowLevels;
+};
+struct GlowU { float tx, ty, threshold, knee; };
+
+static bool ensurePicture(Ctx* c, MTLPixelFormat fmt)
+{
+    NSError* err = nil;
+    if (!c->picLib) {
+        c->picLib = [c->dev newLibraryWithSource:@(kPictureShaders) options:nil error:&err];
+        if (!c->picLib) { NSLog(@"[gpu] picture shaders failed: %@", err); return false; }
+        auto comp = [&](NSString* name) -> id<MTLComputePipelineState> {
+            id<MTLFunction> fn = [c->picLib newFunctionWithName:name];
+            id<MTLComputePipelineState> ps = fn ? [c->dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+#if !__has_feature(objc_arc)
+            [fn release];
+#endif
+            if (!ps) NSLog(@"[gpu] picture pipeline %@ failed: %@", name, err);
+            return ps;
+        };
+        c->picPrefilter = comp(@"pic_prefilter");
+        c->picDown = comp(@"pic_down");
+        c->picUp = comp(@"pic_up");
+        if (!c->picPrefilter || !c->picDown || !c->picUp) return false;
+
+        MTLTextureDescriptor* d2 = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:1 height:1 mipmapped:NO];
+        d2.usage = MTLTextureUsageShaderRead;
+        c->dummy2D = [c->dev newTextureWithDescriptor:d2];
+        MTLTextureDescriptor* d3 = [MTLTextureDescriptor new];
+        d3.textureType = MTLTextureType3D;
+        d3.pixelFormat = MTLPixelFormatRGBA16Float;
+        d3.width = d3.height = d3.depth = 1;
+        d3.usage = MTLTextureUsageShaderRead;
+        c->dummy3D = [c->dev newTextureWithDescriptor:d3];
+#if !__has_feature(objc_arc)
+        [d3 release];
+#endif
+        if (!c->dummy2D || !c->dummy3D) return false;
+    }
+    if (!c->picPipe || c->picPipeFormat != fmt) {
+        if (c->picPipe) WV_RELEASE(c->picPipe);
+        MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
+        id<MTLFunction> vs = [c->picLib newFunctionWithName:@"pic_vs"];
+        id<MTLFunction> fs = [c->picLib newFunctionWithName:@"pic_fs"];
+        d.vertexFunction = vs;
+        d.fragmentFunction = fs;
+        d.colorAttachments[0].pixelFormat = fmt;
+        c->picPipe = [c->dev newRenderPipelineStateWithDescriptor:d error:&err];
+#if !__has_feature(objc_arc)
+        [vs release]; [fs release]; [d release];
+#endif
+        if (!c->picPipe) { NSLog(@"[gpu] picture render pipeline failed: %@", err); return false; }
+        c->picPipeFormat = fmt;
+    }
+    return true;
+}
+
+// The glow pyramid for a W x H frame: level 0 at half size, halving until
+// the short side would drop under 8 pixels (at most kGlowMax levels).
+static bool ensureGlow(Ctx* c, int W, int H)
+{
+    if (c->glowW == W && c->glowH == H && c->glowLevels > 0) return true;
+    for (int i = 0; i < Ctx::kGlowMax; ++i) {
+        if (c->glowDown[i]) WV_RELEASE(c->glowDown[i]);
+        if (c->glowUp[i]) WV_RELEASE(c->glowUp[i]);
+    }
+    c->glowLevels = 0;
+    int w = std::max(1, W / 2), h = std::max(1, H / 2);
+    for (int i = 0; i < Ctx::kGlowMax && std::min(w, h) >= 8; ++i) {
+        MTLTextureDescriptor* td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                         width:(NSUInteger)w height:(NSUInteger)h mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        td.storageMode = MTLStorageModePrivate;
+        c->glowDown[i] = [c->dev newTextureWithDescriptor:td];
+        c->glowUp[i] = [c->dev newTextureWithDescriptor:td];
+        if (!c->glowDown[i] || !c->glowUp[i]) return false;
+        c->glowLevels = i + 1;
+        w = std::max(1, w / 2); h = std::max(1, h / 2);
+    }
+    c->glowW = W; c->glowH = H;
+    return c->glowLevels > 0;
+}
+
+static bool uploadLook(Ctx* c, const LookTable& t)
+{
+    if (c->lutTex && c->lutVersion == t.version && c->lutSize == t.size) return true;
+    const int n = t.size;
+    if (!c->lutTex || c->lutSize != n) {
+        if (c->lutTex) WV_RELEASE(c->lutTex);
+        MTLTextureDescriptor* d = [MTLTextureDescriptor new];
+        d.textureType = MTLTextureType3D;
+        d.pixelFormat = MTLPixelFormatRGBA32Float;
+        d.width = d.height = d.depth = (NSUInteger)n;
+        d.usage = MTLTextureUsageShaderRead;
+        d.storageMode = c->dev.hasUnifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+        c->lutTex = [c->dev newTextureWithDescriptor:d];
+#if !__has_feature(objc_arc)
+        [d release];
+#endif
+        if (!c->lutTex) return false;
+        c->lutSize = n;
+    }
+    std::vector<float> rgba((size_t)n * n * n * 4);
+    for (size_t i = 0, j = 0; i < (size_t)n * n * n; ++i) {
+        rgba[j++] = t.rgb[i * 3]; rgba[j++] = t.rgb[i * 3 + 1]; rgba[j++] = t.rgb[i * 3 + 2]; rgba[j++] = 1.f;
+    }
+    // Every earlier user of the table has completed: present() and
+    // renderPicture() wait for their command buffer before returning.
+    [c->lutTex replaceRegion:MTLRegionMake3D(0, 0, 0, (NSUInteger)n, (NSUInteger)n, (NSUInteger)n)
+                 mipmapLevel:0 slice:0 withBytes:rgba.data()
+                 bytesPerRow:(NSUInteger)n * 4 * sizeof(float)
+               bytesPerImage:(NSUInteger)n * n * 4 * sizeof(float)];
+    c->lutVersion = t.version;
+    return true;
+}
+
+static void dispatch2D(id<MTLCommandBuffer> cb, id<MTLComputePipelineState> ps,
+                       id<MTLTexture> t0, id<MTLTexture> t1, id<MTLTexture> t2, const GlowU& u)
+{
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:ps];
+    [e setTexture:t0 atIndex:0];
+    [e setTexture:t1 atIndex:1];
+    if (t2) [e setTexture:t2 atIndex:2];
+    [e setBytes:&u length:sizeof(u) atIndex:0];
+    id<MTLTexture> out = t2 ? t2 : t1;
+    MTLSize tg = MTLSizeMake(16, 16, 1);
+    MTLSize grid = MTLSizeMake((out.width + 15) / 16, (out.height + 15) / 16, 1);
+    [e dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+    [e endEncoding];
+}
+
+// Encode the whole picture pass: the glow pyramid (if any) and the one
+// fragment pass into `rp`'s colour attachment.
+static void encodePicture(Ctx* c, id<MTLCommandBuffer> cb, id<MTLTexture> src, int sw, int sh,
+                          MTLRenderPassDescriptor* rp, int dw, int dh, const PictureSettings& s)
+{
+    const bool glow = s.glow > 0.001f && ensureGlow(c, sw, sh);
+    if (glow) {
+        GlowU u = { 1.f / sw, 1.f / sh, 0.5f, 0.4f };       // soft threshold: highlights, not mids
+        dispatch2D(cb, c->picPrefilter, src, c->glowDown[0], nil, u);
+        for (int i = 1; i < c->glowLevels; ++i) {
+            id<MTLTexture> prev = c->glowDown[i - 1];
+            GlowU d = { 1.f / prev.width, 1.f / prev.height, 0, 0 };
+            dispatch2D(cb, c->picDown, prev, c->glowDown[i], nil, d);
+        }
+        int L = c->glowLevels;
+        id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+        [bl copyFromTexture:c->glowDown[L - 1] toTexture:c->glowUp[L - 1]];
+        [bl endEncoding];
+        for (int i = L - 2; i >= 0; --i) {
+            id<MTLTexture> coarse = c->glowUp[i + 1];
+            GlowU d = { 1.f / coarse.width, 1.f / coarse.height, 0, 0 };
+            dispatch2D(cb, c->picUp, coarse, c->glowDown[i], c->glowUp[i], d);
+        }
+    }
+    const bool look = s.hasLook() && uploadLook(c, *s.look);
+
+    PicU u = {};
+    u.srcW = (float)sw; u.srcH = (float)sh; u.dstW = (float)dw; u.dstH = (float)dh;
+    u.glow = s.glow; u.lookStrength = std::clamp(s.lookStrength, 0.f, 1.f);
+    u.lookSize = look ? (float)c->lutSize : 1.f;
+    u.vignette = std::clamp(s.vignette, 0.f, 1.f);
+    u.scanlines = std::clamp(s.scanlines, 0.f, 1.f);
+    u.grain = std::clamp(s.grain, 0.f, 1.f);
+    u.bass = std::clamp(s.bass, 0.f, 1.f);
+    u.beat = std::clamp(s.beat, 0.f, 1.f);
+    u.frame = (float)(s.frame & 0xffff);
+    u.pointScale = std::max(1.f, s.pointScale);
+    u.sharp = s.sharpScaling ? 1.f : 0.f;
+    u.dither = s.dither ? 1.f : 0.f;
+    u.hasGlow = glow ? 1.f : 0.f;
+    u.hasLook = look ? 1.f : 0.f;
+    u.beatReactive = s.beatReactive ? 1.f : 0.f;
+    u.glowLevels = (float)(glow ? c->glowLevels : 1);
+
+    id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:c->picPipe];
+    [e setFragmentTexture:src atIndex:0];
+    [e setFragmentTexture:(glow ? c->glowUp[0] : c->dummy2D) atIndex:1];
+    [e setFragmentTexture:(look ? c->lutTex : c->dummy3D) atIndex:2];
+    [e setFragmentBytes:&u length:sizeof(u) atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+}
+
+bool present(const Framebuffer& fb, void* layerPtr, const PictureSettings& picture)
 {
     Ctx* c = ctx();
     if (!c || !layerPtr || fb.w == 0 || fb.h == 0) return false;
@@ -999,17 +1375,7 @@ bool present(const Framebuffer& fb, void* layerPtr)
     auto nowMs = [] { return (double)clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) * 1e-6; };
 
     @autoreleasepool {
-        if (!c->presentPipe) {
-            NSError* err = nil;
-            id<MTLLibrary> lib = [c->dev newLibraryWithSource:@(kPresentShaders) options:nil error:&err];
-            if (!lib) { NSLog(@"[gpu] present shaders failed: %@", err); return false; }
-            MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
-            d.vertexFunction = [lib newFunctionWithName:@"present_vs"];
-            d.fragmentFunction = [lib newFunctionWithName:@"present_fs"];
-            d.colorAttachments[0].pixelFormat = layer.pixelFormat;
-            c->presentPipe = [c->dev newRenderPipelineStateWithDescriptor:d error:&err];
-            if (!c->presentPipe) { NSLog(@"[gpu] present pipeline failed: %@", err); return false; }
-        }
+        if (!ensurePicture(c, layer.pixelFormat)) return false;
 
         double t0 = nowMs();
         id<MTLTexture> R = fbTexture(c, fb);       // zero-copy view of the frame
@@ -1027,22 +1393,75 @@ bool present(const Framebuffer& fb, void* layerPtr)
         rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-        // The draw joins whatever the frame's effects left pending, so a
+        // The pass joins whatever the frame's effects left pending, so a
         // GPU-only stack is a single command buffer from first kernel to
         // screen. The frame's memory is the CPU's and gets rewritten next
         // tick, so this is where the frame's work is finally waited for.
         id<MTLCommandBuffer> cb = c->cb();
-        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-        [e setRenderPipelineState:c->presentPipe];
-        [e setFragmentTexture:R atIndex:0];
-        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-        [e endEncoding];
+        encodePicture(c, cb, R, fb.w, fb.h, rp,
+                      (int)drawable.texture.width, (int)drawable.texture.height, picture);
         [cb presentDrawable:drawable];
         double t3 = nowMs();
         c->flush();
         gPresentGpuMs = nowMs() - t3;
     }
     return true;
+}
+
+bool renderPicture(const Framebuffer& fb, const PictureSettings& picture,
+                   int outW, int outH, std::vector<uint8_t>& rgba)
+{
+    Ctx* c = ctx();
+    if (!c || c->broken || fb.w == 0 || fb.h == 0 || outW <= 0 || outH <= 0) return false;
+    bool ok = false;
+    @autoreleasepool {
+        if (!ensurePicture(c, MTLPixelFormatBGRA8Unorm)) return false;
+        id<MTLTexture> R = fbTexture(c, fb);
+        if (!R) return false;
+        MTLTextureDescriptor* td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                         width:(NSUInteger)outW height:(NSUInteger)outH mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget;
+        td.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> target = [c->dev newTextureWithDescriptor:td];
+        const NSUInteger rowBytes = (NSUInteger)outW * 4;
+        id<MTLBuffer> readback = [c->dev newBufferWithLength:rowBytes * (NSUInteger)outH
+                                                     options:MTLResourceStorageModeShared];
+        if (target && readback) {
+            MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = target;
+            rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLCommandBuffer> cb = c->cb();
+            encodePicture(c, cb, R, fb.w, fb.h, rp, outW, outH, picture);
+            id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+            [b copyFromTexture:target sourceSlice:0 sourceLevel:0
+                  sourceOrigin:MTLOriginMake(0, 0, 0)
+                    sourceSize:MTLSizeMake((NSUInteger)outW, (NSUInteger)outH, 1)
+                      toBuffer:readback destinationOffset:0
+             destinationBytesPerRow:rowBytes destinationBytesPerImage:rowBytes * (NSUInteger)outH];
+            [b endEncoding];
+            c->flush();
+            // The render target's row 0 is the top of the image, where the
+            // framebuffer keeps its last row: flip so row 0 matches fb row 0.
+            rgba.resize((size_t)outW * outH * 4);
+            const uint8_t* p = (const uint8_t*)readback.contents;
+            for (int y = 0; y < outH; ++y) {
+                const uint8_t* srow = p + (size_t)(outH - 1 - y) * rowBytes;
+                uint8_t* drow = rgba.data() + (size_t)y * rowBytes;
+                for (int x = 0; x < outW; ++x) {
+                    drow[x * 4 + 0] = srow[x * 4 + 2];
+                    drow[x * 4 + 1] = srow[x * 4 + 1];
+                    drow[x * 4 + 2] = srow[x * 4 + 0];
+                    drow[x * 4 + 3] = 255;
+                }
+            }
+            ok = true;
+        }
+        if (target) WV_RELEASE(target);
+        if (readback) WV_RELEASE(readback);
+    }
+    return ok;
 }
 
 // ---------------------------------------------------------------------------

@@ -32,6 +32,11 @@ silicon and Intel); all versions on the
   aberration, shockwave, glitch, anamorphic streaks, lens, radial blur, edge
   glow, duotone, heat shimmer, CRT, tone mapping, vignette — and
   `pixel_shader`: EEL scripts transpiled to Metal and run per pixel.
+- **Picture looks.** Colour looks (Warm, Cold, Sepia, Teal & Orange, Noir,
+  Bleach bypass, Faded film, Vivid, or your own `.cube` file), glow, film
+  grain, vignette and scanlines over any preset, with sharp upscaling and
+  dithering. They act only on what reaches the screen, never on the frame a
+  preset feeds back, so classic presets still behave exactly as authored.
 - **A GPU engine.** Zero-copy Metal backend over the framebuffer's own memory,
   deferred command buffers, the hot classic effects ported to compute kernels
   with the CPU loops as fallback. A steady 60 fps, paced by the display.

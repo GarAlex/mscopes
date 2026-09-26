@@ -12,6 +12,10 @@
 //
 #pragma once
 #include "Framebuffer.h"
+#include "Picture.h"
+#include <cstdint>
+#include <string>
+#include <vector>
 #include <string>
 
 namespace viz { namespace gpu {
@@ -27,11 +31,23 @@ void* metalDevice();
 
 // --- presentation --------------------------------------------------------
 // Draw fb into the next drawable of a CAMetalLayer (passed as void* so this
-// header stays C++-clean): a bilinear fullscreen quad straight from fb's
-// wrapped texture (rgba32Float → the layer's bgra8). Replaces the AppKit
-// blit + backing-store commit, which was the app's real frame-rate ceiling.
-// Returns false when Metal is unavailable (caller falls back to the CPU blit).
-bool present(const Framebuffer& fb, void* caMetalLayer);
+// header stays C++-clean) through the picture pass (Picture.h): scaling to
+// the drawable (sharp or bilinear), glow, colour look, vignette, grain,
+// scanlines and dither, all in one fragment pass plus a small glow pyramid.
+// Only the drawable is written — fb, the frame a preset feeds forward, is
+// read and never modified. Returns false when Metal is unavailable (caller
+// falls back to the CPU blit).
+bool present(const Framebuffer& fb, void* caMetalLayer, const PictureSettings& picture);
+inline bool present(const Framebuffer& fb, void* caMetalLayer)
+{
+    return present(fb, caMetalLayer, PictureSettings());
+}
+
+// The same picture pass into an offscreen outW x outH image, read back as
+// RGBA8 (row 0 = the framebuffer's row 0). For tests and vizrender.
+// Returns false without a GPU.
+bool renderPicture(const Framebuffer& fb, const PictureSettings& picture,
+                   int outW, int outH, std::vector<uint8_t>& rgba);
 
 // Profiling: milliseconds the last present() spent binding the frame (always
 // ~0 now), waiting for a drawable, and waiting for the GPU.

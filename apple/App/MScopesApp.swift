@@ -23,6 +23,12 @@ struct MScopesApp: App {
                 .environmentObject(model)
         }
         .defaultSize(width: 720, height: 520)
+
+        Window("Picture", id: PictureWindow.windowID) {
+            PictureWindow()
+                .environmentObject(model)
+        }
+        .windowResizability(.contentSize)
     }
 }
 
@@ -39,6 +45,11 @@ struct PresetCommands: Commands {
                 .disabled(model.widgetMode)
             Button(model.widgetMode ? "Leave Widget Mode" : "Widget Mode") { model.widgetMode.toggle() }
                 .keyboardShortcut("w", modifiers: [.command, .shift])
+            Divider()
+            Button("Picture…") { openWindow(id: PictureWindow.windowID) }
+                .keyboardShortcut("p", modifiers: [.command, .option])
+            Button("Next Look") { model.picture.nextLook() }
+                .keyboardShortcut("l", modifiers: [.command, .option])
         }
         CommandMenu("Presets") {
             Button("Preset Browser…") { openWindow(id: PresetBrowserView.windowID) }

@@ -8,7 +8,7 @@ name: MScopes
 options:
   bundleIdPrefix: com.writea
   deploymentTarget:
-    macOS: "11.0"                          # engine + plugin floor; the app overrides
+    macOS: "12.0"                          # engine + plugin floor (Xcode 27 minimum); the app overrides
   createIntermediateGroups: true
 
 settings:
