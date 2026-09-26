@@ -32,6 +32,7 @@ final class PictureModel: ObservableObject {
     @Published var smoothLines: Bool { didSet { engine.smoothLines = smoothLines; save() } }
     @Published var highResolution: Bool { didSet { engine.highResolution = highResolution; save() } }
     @Published var classicEnhanced: Bool { didSet { engine.classicEnhanced = classicEnhanced; save() } }
+    @Published var hdrHighlights: Bool { didSet { engine.hdrHighlights = hdrHighlights; save() } }
     @Published var lastError: String?
 
     private var customLookPath: String?
@@ -52,6 +53,7 @@ final class PictureModel: ObservableObject {
         smoothLines = d.object(forKey: "picture.smoothLines") as? Bool ?? true
         highResolution = d.object(forKey: "picture.highResolution") as? Bool ?? true
         classicEnhanced = d.object(forKey: "picture.classicEnhanced") as? Bool ?? false
+        hdrHighlights = d.object(forKey: "picture.hdrHighlights") as? Bool ?? true
         customLookPath = d.string(forKey: "picture.customLookPath")
 
         // didSet doesn't run during init: push everything once.
@@ -70,6 +72,7 @@ final class PictureModel: ObservableObject {
         engine.smoothLines = smoothLines
         engine.highResolution = highResolution
         engine.classicEnhanced = classicEnhanced
+        engine.hdrHighlights = hdrHighlights
         loading = false
         applyLook()
     }
@@ -108,7 +111,7 @@ final class PictureModel: ObservableObject {
     func reset() {
         look = 0; strength = 1; grain = 0; vignette = 0; glow = 0; scanlines = 0
         reactToBeat = false; sharpScaling = true
-        smoothLines = true; highResolution = true; classicEnhanced = false
+        smoothLines = true; highResolution = true; classicEnhanced = false; hdrHighlights = true
     }
 
     private func applyLook() {
@@ -130,6 +133,7 @@ final class PictureModel: ObservableObject {
         defaults.set(smoothLines, forKey: "picture.smoothLines")
         defaults.set(highResolution, forKey: "picture.highResolution")
         defaults.set(classicEnhanced, forKey: "picture.classicEnhanced")
+        defaults.set(hdrHighlights, forKey: "picture.hdrHighlights")
         defaults.set(customLookPath, forKey: "picture.customLookPath")
     }
 }

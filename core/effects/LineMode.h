@@ -37,6 +37,14 @@ LineMode& lineMode();         // the shared state (UtilEffects.cpp)
 struct DrawQuality {
     bool  smooth = false;     // anti-aliased, sub-pixel lines and dots
     float widthScale = 1.f;   // render pixels per "classic" pixel: line widths and dots scale by it
+    // HDR highlights (never for classic presets). The frame a preset keeps
+    // is written exactly as without HDR — clipped at white — so every
+    // preset's feedback evolves identically. The light that clipped goes to
+    // `overflow` instead: a per-frame buffer (cleared every frame, never fed
+    // back) that the display adds on top as white-hot highlights, or as
+    // real extra brightness on an extended-range screen.
+    bool  hdr = false;
+    Framebuffer* overflow = nullptr;   // set by the host each frame when hdr
 };
 
 DrawQuality& drawQuality();   // shared state, set by the host (UtilEffects.cpp)
@@ -86,6 +94,14 @@ inline void blendPixelCoverage(Framebuffer& fb, int x, int y, float r, float g, 
     for (int c = 0; c < 3; ++c) p[c] += (blendChannel(mode, p[c], s[c], alpha) - p[c]) * cov;
     p[3] = 1.f;
 }
+
+// The overflow buffer additive light above white goes to, for `fb`: only
+// with HDR on and when it matches fb (an Effect List's own buffer doesn't).
+inline Framebuffer* overflowFor(const Framebuffer& fb);
+
+// Additive light for the built-in effects: fb clipped at white exactly as
+// always; with HDR, what clipped is kept in the overflow buffer.
+inline void addLight(Framebuffer& fb, int x, int y, float r, float g, float b);
 
 // The BLEND_LINE analogue: one pixel in the current global mode.
 inline void putLinePixel(Framebuffer& fb, int x, int y, float r, float g, float b)
@@ -138,5 +154,27 @@ void drawSegmentAA(Framebuffer& fb, float x0, float y0, float x1, float y1, floa
                    bool capStart = true, bool capEnd = true);
 void plotDotAA(Framebuffer& fb, float x, float y, float radius,
                float r, float g, float b, int mode, float alpha);
+
+inline Framebuffer* overflowFor(const Framebuffer& fb)
+{
+    const DrawQuality& q = drawQuality();
+    return (q.hdr && q.overflow && q.overflow != &fb && q.overflow->w == fb.w && q.overflow->h == fb.h)
+        ? q.overflow : nullptr;
+}
+
+inline void addLight(Framebuffer& fb, int x, int y, float r, float g, float b)
+{
+    Framebuffer* ov = overflowFor(fb);
+    if (!ov) { fb.addClamped(x, y, r, g, b); return; }
+    if (x < 0 || y < 0 || x >= fb.w || y >= fb.h) return;
+    float* p = fb.at(x, y);
+    float* o = ov->at(x, y);
+    const float s[3] = {r, g, b};
+    for (int c = 0; c < 3; ++c) {
+        float v = p[c] + s[c];
+        if (v > 1.f) { o[c] += v - 1.f; v = 1.f; }
+        p[c] = v;
+    }
+}
 
 } // namespace viz

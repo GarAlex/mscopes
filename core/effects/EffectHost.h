@@ -11,6 +11,7 @@
 #include "EelVM.h"
 #include "GpuFx.h"
 #include "Profile.h"
+#include "LineMode.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -123,6 +124,21 @@ public:
         _audio = audio;
         prof::beginFrame();
 
+        // HDR highlights: a fresh overflow buffer each frame for the light
+        // that clips at white (LineMode.h DrawQuality). It is never fed
+        // back — the display adds it on top — so presets evolve exactly as
+        // without HDR. The previous frame's GPU work is complete here.
+        DrawQuality& dq = drawQuality();
+        if (dq.hdr) {
+            gpu::invalidateResident(&_overflow);
+            if (_overflow.w != _cur.w || _overflow.h != _cur.h) _overflow.resize(_cur.w, _cur.h);
+            else std::fill(_overflow.px.begin(), _overflow.px.end(), 0.f);
+            dq.overflow = &_overflow;
+        } else {
+            dq.overflow = nullptr;
+            if (!_overflow.px.empty()) _overflow = Framebuffer();
+        }
+
         // reg-driven params (clamped to each param's declared range)
         for (const auto& b : _bindings)
             if (Effect* e = at(b.effectIndex))
@@ -187,6 +203,10 @@ public:
     const Framebuffer& current() const { return _cur; }
     const Framebuffer& currentSynced() const { gpu::syncToCpuForRead(_cur); return _cur; }
 
+    // This frame's HDR overflow (light above white, not fed back); empty
+    // when HDR highlights are off.
+    const Framebuffer& overflow() const { return _overflow; }
+
     // Per-effect self time (ms) of the last renderFrame, costliest first.
     // Nested list children are reported individually by their own names.
     std::vector<std::pair<std::string, double>> lastProfile() const { return prof::summary(); }
@@ -198,6 +218,7 @@ private:
     }
 
     Framebuffer _cur, _prev;
+    Framebuffer _overflow;               // per-frame HDR light above white
     VizFrame _audio;          // per-frame working copy (mutable beat)
     std::vector<std::unique_ptr<Effect>> _effects;
     std::vector<ParamBinding> _bindings;

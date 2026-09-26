@@ -241,12 +241,47 @@ static void testGpu(const std::string& outDir)
     if (!outDir.empty()) writeRgba(out, W * 2, H * 2, outDir + "/picture_all.png");
 }
 
+// HDR highlights at display time: pixels without overflow are exactly SDR;
+// overflow turns a pixel white-hot; an extended-range output adds real
+// brightness above white, capped at the headroom.
+static void testHdrDisplay()
+{
+    if (!gpu::available()) return;
+    const int W = 64, H = 36;
+    Framebuffer frame = frameOf(W, H, 1.0f, 0.45f, 0.05f);            // saturated orange, clipped
+    Framebuffer ov = frameOf(W, H, 0, 0, 0);
+    for (int y = 10; y < 26; ++y) for (int x = 20; x < 44; ++x) {    // a hot patch
+        float* p = ov.at(x, y); p[0] = 3.0f; p[1] = 1.2f; p[2] = 0.1f;
+    }
+    PictureSettings sdr; sdr.dither = false;
+    PictureSettings hdr = sdr; hdr.hdr = true; hdr.overflow = &ov;
+    std::vector<uint8_t> a, b;
+    CHECK(gpu::renderPicture(frame, sdr, W, H, a) && gpu::renderPicture(frame, hdr, W, H, b), "HDR display runs");
+    CHECK(meanRegion(a, W, 0, 0, 16, 8, 1) == meanRegion(b, W, 0, 0, 16, 8, 1), "no overflow: exactly as SDR");
+    double g = meanRegion(b, W, 24, 14, 40, 22, 1), bl = meanRegion(b, W, 24, 14, 40, 22, 2);
+    CHECK(g > 200 && bl > 180, "overflow: white-hot (g %.0f b %.0f, was 115 and 13)", g, bl);
+
+    std::vector<float> lin;
+    PictureSettings edr = hdr; edr.headroom = 3.f;
+    CHECK(gpu::renderPictureLinear(frame, edr, W, H, lin), "extended-range output runs");
+    auto at = [&](int x, int y, int c) { return lin[((size_t)y * W + x) * 4 + c]; };
+    CHECK(std::fabs(at(2, 2, 0) - 1.0f) < 1e-3f && std::fabs(at(2, 2, 1) - 0.171f) < 5e-3f,
+          "extended range: SDR pixels are their linear value (%.3f %.3f)", at(2, 2, 0), at(2, 2, 1));
+    float peak = std::max(at(32, 18, 0), std::max(at(32, 18, 1), at(32, 18, 2)));
+    CHECK(peak > 1.5f && peak <= 3.001f, "extended range: the hot patch is brighter than white, within headroom (%.2f)", peak);
+    PictureSettings capped = edr; capped.headroom = 64.f;
+    CHECK(gpu::renderPictureLinear(frame, capped, W, H, lin), "large headroom runs");
+    peak = std::max(lin[((size_t)18 * W + 32) * 4], lin[((size_t)18 * W + 32) * 4 + 1]);
+    CHECK(peak <= 4.001f, "headroom is capped at 4x white (%.2f)", peak);
+}
+
 int main(int argc, const char** argv)
 {
     std::string outDir = argc > 1 ? argv[1] : "";
     testLooks();
     testCube();
     testGpu(outDir);
+    testHdrDisplay();
     printf(">> picture: %s (%d failures)\n", gFailures ? "FAIL" : "ok", gFailures);
     return gFailures ? 1 : 0;
 }

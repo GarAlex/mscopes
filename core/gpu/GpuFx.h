@@ -49,6 +49,11 @@ inline bool present(const Framebuffer& fb, void* caMetalLayer)
 bool renderPicture(const Framebuffer& fb, const PictureSettings& picture,
                    int outW, int outH, std::vector<uint8_t>& rgba);
 
+// The same into linear-light floats, as an extended-range layer receives
+// them (values above 1 = brighter than SDR white). For tests.
+bool renderPictureLinear(const Framebuffer& fb, const PictureSettings& picture,
+                         int outW, int outH, std::vector<float>& rgba);
+
 // Profiling: milliseconds the last present() spent binding the frame (always
 // ~0 now), waiting for a drawable, and waiting for the GPU.
 void lastPresentTimes(double* bindMs, double* drawableWaitMs, double* gpuWaitMs);
@@ -67,9 +72,12 @@ void syncToCpu(Framebuffer& fb);              // CPU will write fb: flush
 void syncToCpuForRead(const Framebuffer& fb); // CPU will read fb: flush
 void invalidateResident(const void* fbAddr);  // fb is being cleared/destroyed: flush
 
-// Bloom: threshold → separable gaussian blur → additive recombine.
-// radius in source pixels (1..64), threshold 0..1, intensity 0..4.
-void bloom(Framebuffer& fb, float threshold, float radius, float intensity);
+// Bloom: soft-threshold prefilter → multi-scale pyramid (depth set by
+// radius, in source pixels) → frame + glow * intensity through a soft
+// rolloff. With an overflow buffer (HDR highlights) the light above white
+// the rolloff removed is added there; the frame is the same either way.
+void bloom(Framebuffer& fb, float threshold, float radius, float intensity,
+           Framebuffer* overflow = nullptr);
 
 // N-fold mirrored kaleidoscope around the center. angle animates the spin,
 // zoom scales the sampled source (1 = none).
@@ -111,7 +119,9 @@ void shimmer(Framebuffer& fb, float amountPx, float scale, float t);
 void crt(Framebuffer& fb, float curvature, float scanlines, float mask, float corner);
 
 // Filmic-ish tone map: exposure rolloff (1-exp), gamma, saturation scale.
-void toneMap(Framebuffer& fb, float exposure, float gamma, float saturation);
+// With an overflow buffer the exposed light above white is added there.
+void toneMap(Framebuffer& fb, float exposure, float gamma, float saturation,
+             Framebuffer* overflow = nullptr);
 
 // Darken toward the frame edge: fade from `inner` to `outer` radius
 // (aspect-true, 1 = half-height) by `strength` (0..1).

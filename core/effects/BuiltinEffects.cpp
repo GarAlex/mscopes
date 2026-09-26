@@ -108,7 +108,7 @@ void ScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         // draw a short vertical span between prevY..y so the trace is continuous
         int y0 = (int)std::min(prevY, y), y1 = (int)std::max(prevY, y);
         y0 = std::clamp(y0, 0, H - 1); y1 = std::clamp(y1, 0, H - 1);
-        for (int yy = y0; yy <= y1; ++yy) cur.addClamped(x, yy, r, g, b);
+        for (int yy = y0; yy <= y1; ++yy) addLight(cur, x, yy, r, g, b);
         prevY = y;
     }
 
@@ -122,7 +122,7 @@ void ScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         int bh = (int)(e * H * 0.35f);
         float r, g, b; hsv(0.6f - f * 0.6f, 0.9f, gain * 0.7f, r, g, b);
         int x = (int)(f * W);
-        for (int yy = 0; yy < bh; ++yy) cur.addClamped(x, yy, r, g, b);
+        for (int yy = 0; yy < bh; ++yy) addLight(cur, x, yy, r, g, b);
     }
 }
 
@@ -275,7 +275,7 @@ void StarfieldEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         int ix = (int)px, iy = (int)py;
         for (int oy = 0; oy < 2; ++oy)
             for (int ox = 0; ox < 2; ++ox)
-                cur.addClamped(ix + ox, iy + oy, lum, lum, std::min(1.f, lum * 1.15f));
+                addLight(cur, ix + ox, iy + oy, lum, lum, std::min(1.f, lum * 1.15f));
     }
 }
 

@@ -5,6 +5,8 @@
 //             [--size WxH] [--out dir]
 //   vizrender --builtin "<name>"    (or --list to see the built-in presets)
 //   --smooth      smooth drawing (anti-aliased, sub-pixel lines and dots)
+//   --hdr         HDR highlights: the light that clips at white each frame is
+//                 kept aside and shown white-hot (implies the picture pass)
 //   --width-scale x   render pixels per point for line widths (default 1)
 //   --last        write only the final frame (a still, without filling the disk:
 //                 a 1280x720 sequence is ~1.5 MB per frame)
@@ -103,6 +105,7 @@ int main(int argc, const char** argv)
         else if (a == "--out") out = next();
         else if (a == "--last") lastOnly = true;
         else if (a == "--smooth") drawQuality().smooth = true;
+        else if (a == "--hdr") { drawQuality().hdr = true; pic.hdr = true; usePicture = true; }
         else if (a == "--width-scale") drawQuality().widthScale = (float)atof(next());
         else if (a == "--list-looks") { for (const auto& n : lookNames()) printf("%s\n", n.c_str()); return 0; }
         else if (a == "--look") { lookName = next(); usePicture = true; }
@@ -195,6 +198,7 @@ int main(int argc, const char** argv)
         if (usePicture) {
             beatLevel = f.beat ? 1.f : beatLevel * 0.85f;
             pic.beat = beatLevel; pic.bass = std::min(1.f, f.bass * 1.6f); pic.frame = (uint32_t)i;
+            pic.overflow = pic.hdr ? &host.overflow() : nullptr;
             if (!gpu::renderPicture(*toWrite, pic, DW, DH, rgba)) {
                 fprintf(stderr, "vizrender: picture pass failed\n");
                 return 3;

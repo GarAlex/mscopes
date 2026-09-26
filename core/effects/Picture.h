@@ -19,6 +19,8 @@
 
 namespace viz {
 
+struct Framebuffer;
+
 // Edge length of the baked look tables (33 is the common .cube size).
 static constexpr int kLookSize = 33;
 
@@ -60,6 +62,17 @@ struct PictureSettings {
     bool  beatReactive = false;        // grain and glow breathe with the music
     bool  sharpScaling = true;         // de-ringed bicubic instead of bilinear upscale
     bool  dither = true;               // last step: removes banding in 8-bit output
+
+    // HDR highlights (Phase 3). `overflow` holds the light that clipped at
+    // white this frame (the host's per-frame buffer; never fed back): the
+    // pass turns those pixels white-hot, and with linearOutput (an
+    // extended-range float layer) also adds real brightness above white, up
+    // to `headroom` times SDR white. Pixels without overflow look exactly as
+    // in SDR.
+    bool  hdr = false;
+    const Framebuffer* overflow = nullptr;
+    bool  linearOutput = false;
+    float headroom = 1.f;              // the screen's current EDR headroom (1 = SDR)
 
     // Per frame.
     float bass = 0.f;                  // 0..1

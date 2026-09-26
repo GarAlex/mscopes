@@ -2,6 +2,7 @@
 // ModernEffects.cpp — see ModernEffects.h.
 //
 #include "ModernEffects.h"
+#include "LineMode.h"
 #include <algorithm>
 #include <cmath>
 
@@ -111,8 +112,7 @@ void ParticleSystemEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
                 const float ex = cx + dx + 0.5f - p.x, ey = cy + dy + 0.5f - p.y;
                 float fall = std::exp(-(ex * ex + ey * ey) * inv2s2) * fade;
                 if (fall < 0.02f) continue;
-                cur.addClamped(cx + dx, cy + dy,
-                               rgb[0] * fall, rgb[1] * fall, rgb[2] * fall);
+                addLight(cur, cx + dx, cy + dy, rgb[0] * fall, rgb[1] * fall, rgb[2] * fall);
             }
     }
 }

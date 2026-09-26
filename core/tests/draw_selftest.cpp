@@ -258,6 +258,64 @@ static void testEffects(const std::string& outDir)
     setQuality(false);
 }
 
+// HDR highlights: additive light that clips goes to the overflow buffer,
+// the frame itself is written exactly as without HDR.
+static void testOverflowCapture()
+{
+    Framebuffer fb = blank(32, 32), ov = blank(32, 32), ref = blank(32, 32);
+    ov.clear(0, 0, 0, 0);
+    DrawQuality& q = drawQuality();
+    q.smooth = true; q.widthScale = 1.f;
+    for (int pass = 0; pass < 3; ++pass) {
+        q.hdr = false; q.overflow = nullptr;
+        addLight(ref, 10, 10, 0.6f, 0.3f, 0.1f);
+        drawSegmentAA(ref, 2.3f, 20.4f, 28.7f, 22.1f, 0.5f, 0.7f, 0.5f, 0.2f, 1, 1.f);
+        plotDotAA(ref, 20.3f, 5.6f, 1.5f, 0.8f, 0.8f, 0.8f, 1, 1.f);
+        q.hdr = true; q.overflow = &ov;
+        addLight(fb, 10, 10, 0.6f, 0.3f, 0.1f);
+        drawSegmentAA(fb, 2.3f, 20.4f, 28.7f, 22.1f, 0.5f, 0.7f, 0.5f, 0.2f, 1, 1.f);
+        plotDotAA(fb, 20.3f, 5.6f, 1.5f, 0.8f, 0.8f, 0.8f, 1, 1.f);
+    }
+    q.hdr = false; q.overflow = nullptr; q.smooth = false;
+    CHECK(fb.px == ref.px, "HDR: the frame is written exactly as without HDR");
+    // Three passes of 0.6 red at one pixel: 1.8 in total, 0.8 clipped.
+    CHECK(std::fabs(ov.at(10, 10)[0] - 0.8f) < 1e-5f && ov.at(10, 10)[2] < 1e-6f,
+          "HDR: the clipped light is kept (%.3f red, want 0.8)", ov.at(10, 10)[0]);
+    double total = 0; for (size_t i = 0; i < ov.px.size(); i += 4) total += ov.px[i] + ov.px[i + 1] + ov.px[i + 2];
+    CHECK(total > 1.0, "HDR: lines and dots overflow too (%.2f)", total);
+}
+
+// The property the whole HDR design rests on: with HDR on, the frames a
+// preset keeps (and feeds back) are identical to HDR off, frame after
+// frame; only the separate overflow differs. Every built-in preset.
+static void testHdrKeepsPresets()
+{
+    for (const auto& p : builtinPresets()) {
+        Framebuffer out[2];
+        double overflowLight = 0;
+        for (int hdr = 0; hdr < 2; ++hdr) {
+            drawQuality() = DrawQuality();
+            drawQuality().smooth = true;
+            EffectHost host;
+            host.resize(320, 180);
+            applyPreset(host, p);
+            VizFrame f;
+            EffectContext ctx;
+            for (int i = 0; i < 90; ++i) {
+                drawQuality().hdr = hdr == 1;
+                test::synthAudio(f, i);
+                ctx.frame = i; ctx.time = i / 60.0;
+                host.renderFrame(f, ctx);
+            }
+            out[hdr] = host.currentSynced();
+            if (hdr) for (float v : host.overflow().px) overflowLight += v;
+        }
+        CHECK(out[0].px == out[1].px, "%s: HDR leaves the frame identical", p.name.c_str());
+        CHECK(overflowLight >= 0 && std::isfinite(overflowLight), "%s: overflow finite", p.name.c_str());
+    }
+    drawQuality() = DrawQuality();
+}
+
 int main(int argc, const char** argv)
 {
     std::string outDir = argc > 1 ? argv[1] : "";
@@ -267,6 +325,8 @@ int main(int argc, const char** argv)
     testDots();
     testRobustness();
     testEffects(outDir);
+    testOverflowCapture();
+    testHdrKeepsPresets();
     printf(">> draw: %s (%d failures)\n", gFailures ? "FAIL" : "ok", gFailures);
     return gFailures ? 1 : 0;
 }

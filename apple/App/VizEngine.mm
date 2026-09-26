@@ -69,6 +69,7 @@ static void wvOnSIGUSR2(int)
     BOOL          showHUD;
     double        blitMs;            // last present/blit cost (profiling)
 @private
+    BOOL              _edr;          // the layer is an extended-range float layer right now
     NSBitmapImageRep* _blitRep;      // CPU fallback: reused across frames
     BOOL              _metal;
     CATextLayer*      _hud;
@@ -105,6 +106,26 @@ static void wvOnSIGUSR2(int)
     l.presentsWithTransaction = NO;
     l.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
     return l;
+}
+
+- (void)setExtendedRange:(BOOL)on
+{
+    CAMetalLayer* l = (CAMetalLayer*)self.layer;
+    if (on) {
+        // Display P3 primaries: the 8-bit layer has no colour space, so on
+        // these (P3) screens its values already show as P3. The float layer
+        // keeps the same colours; only the range above white is new.
+        l.pixelFormat = MTLPixelFormatRGBA16Float;
+        CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearDisplayP3);
+        l.colorspace = cs;
+        CGColorSpaceRelease(cs);
+        l.wantsExtendedDynamicRangeContent = YES;
+    } else {
+        l.wantsExtendedDynamicRangeContent = NO;
+        l.colorspace = nil;
+        l.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    }
+    _edr = on;
 }
 
 - (void)syncDrawableSize
@@ -157,6 +178,18 @@ static void wvOnSIGUSR2(int)
         if (!self.layer) return;
         viz::PictureSettings s = pic ? *pic : viz::PictureSettings();
         s.pointScale = (float)self.layer.contentsScale;
+        // HDR highlights on a screen with extended range (XDR): switch the
+        // layer to linear float so highlights can shine above SDR white.
+        // Everywhere else it stays the 8-bit layer, exactly as before.
+        // MSCOPES_FORCE_EDR=1 uses the float layer on any screen (testing the
+        // path on an SDR display, where headroom stays 1).
+        static const bool forceEDR = getenv("MSCOPES_FORCE_EDR") != nullptr;
+        NSScreen* screen = self.window.screen;
+        const BOOL wantEDR = s.hdr && screen &&
+            (forceEDR || screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.01);
+        if (wantEDR != _edr) [self setExtendedRange:wantEDR];
+        s.linearOutput = _edr;
+        s.headroom = _edr ? (float)std::max<CGFloat>(1.0, screen.maximumExtendedDynamicRangeColorComponentValue) : 1.f;
         viz::gpu::present(*fb, (__bridge void*)self.layer, s);
         [self updateHUD];
     } else {
@@ -219,6 +252,7 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     BOOL                  _classicEnhanced;
     BOOL                  _presetIsClassic;
     BOOL                  _highResBlocked;   // this preset missed the frame budget at high res
+    BOOL                  _hdrHighlights;
     double                _renderMsAvg;
     int                   _overBudgetFrames;
     viz::Analyzer         _analyzer;
@@ -294,6 +328,7 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
         _lookIndex = 0;
         _view->pic = &_pic;
         _smoothLines = YES;
+        _hdrHighlights = YES;
         _highResolution = YES;
         _classicEnhanced = NO;
         _presetIsClassic = NO;
@@ -566,6 +601,8 @@ static NSString* safeNS(const std::string& s)
 - (BOOL)classicEnhanced { return _classicEnhanced; }
 - (void)setClassicEnhanced:(BOOL)b { _classicEnhanced = b; _highResBlocked = NO; _overBudgetFrames = 0; }
 - (BOOL)presetIsClassic { return _presetIsClassic; }
+- (BOOL)hdrHighlights { return _hdrHighlights; }
+- (void)setHdrHighlights:(BOOL)b { _hdrHighlights = b; }
 
 - (void)setAspectMode:(NSInteger)mode { _aspectMode = (int)mode; }
 - (NSInteger)aspectMode { return _aspectMode; }
@@ -1108,6 +1145,10 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
         // render pixels per point, so a one-pixel line stays one point wide.
         viz::DrawQuality& dq = viz::drawQuality();
         dq.smooth = _smoothLines && enhance;
+        // HDR highlights: built-in presets only (classic presets' look
+        // depends on clipping at white; they stay exactly as authored).
+        dq.hdr = _hdrHighlights && !_presetIsClassic;
+        _pic.hdr = dq.hdr;
         dq.widthScale = vb.width > 0 ? std::max(1.f, (float)(_host.current().w / vb.width)) : 1.f;
     }
 
@@ -1160,6 +1201,7 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     CFTimeInterval tR = CACurrentMediaTime();
     _host.renderFrame(f, _fxCtx);
     CFTimeInterval tE = CACurrentMediaTime();
+    _pic.overflow = _pic.hdr ? &_host.overflow() : nullptr;
 
     [_view presentFrame];
 

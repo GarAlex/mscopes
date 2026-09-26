@@ -3,6 +3,7 @@
 //
 #include "GpuEffects.h"
 #include "GpuFx.h"
+#include "LineMode.h"
 #include "EelToMsl.h"
 #include <algorithm>
 #include <cmath>
@@ -13,7 +14,7 @@ void BloomEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
                          const VizFrame& a, const EffectContext& /*ctx*/)
 {
     float k = intensity * (1.f + bassBoost * a.bass);
-    gpu::bloom(cur, threshold, radius, k);
+    gpu::bloom(cur, threshold, radius, k, overflowFor(cur));
 }
 
 void KaleidoscopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
@@ -136,7 +137,7 @@ void CRTEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
 void ToneMapEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
                            const VizFrame& /*a*/, const EffectContext& /*ctx*/)
 {
-    gpu::toneMap(cur, exposure, gamma, saturation);
+    gpu::toneMap(cur, exposure, gamma, saturation, overflowFor(cur));
 }
 
 void VignetteEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,

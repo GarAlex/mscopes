@@ -100,6 +100,25 @@ static CovBlendFn covBlendFor(int mode)
     }
 }
 
+// Additive with coverage, HDR: fb gets exactly what mode 1 would write
+// (clipped at white), the part that clipped goes to the overflow buffer.
+static inline void addCoverageHdr(Framebuffer& fb, Framebuffer& ov, int x, int y,
+                                  const float s[3], float cov)
+{
+    if (x < 0 || y < 0 || x >= fb.w || y >= fb.h) return;
+    if (cov > 1.f) cov = 1.f;
+    float* p = fb.at(x, y);
+    float* o = ov.at(x, y);
+    for (int c = 0; c < 3; ++c) {
+        // mode 1 with coverage: d + (min(1, d + s) - d) * cov
+        const float full = p[c] + s[c];
+        const float kept = p[c] + (std::min(1.f, full) - p[c]) * cov;
+        if (full > 1.f) o[c] += (full - 1.f) * cov;
+        p[c] = kept;
+    }
+    p[3] = 1.f;
+}
+
 static inline bool finite4(float a, float b, float c, float d)
 {
     return std::isfinite(a) && std::isfinite(b) && std::isfinite(c) && std::isfinite(d);
@@ -110,16 +129,22 @@ void plotDotAA(Framebuffer& fb, float x, float y, float radius,
 {
     if (!std::isfinite(x) || !std::isfinite(y)) return;
     if (x < -64.f || y < -64.f || x > fb.w + 64.f || y > fb.h + 64.f) return;
+    Framebuffer* ov = mode == 1 ? overflowFor(fb) : nullptr;
+    const float src[3] = {r, g, b};
+    auto put = [&](int px, int py, float cov) {
+        if (ov) addCoverageHdr(fb, *ov, px, py, src, cov);
+        else blendPixelCoverage(fb, px, py, r, g, b, mode, alpha, cov);
+    };
     if (radius <= 0.75f) {
         // A one-pixel footprint [x-.5, x+.5] x [y-.5, y+.5] split over the
         // (up to) four pixels it overlaps: energy kept, motion sub-pixel.
         const float fx = x - 0.5f, fy = y - 0.5f;
         const int ix = (int)std::floor(fx), iy = (int)std::floor(fy);
         const float ax = fx - ix, ay = fy - iy;
-        blendPixelCoverage(fb, ix,     iy,     r, g, b, mode, alpha, (1.f - ax) * (1.f - ay));
-        blendPixelCoverage(fb, ix + 1, iy,     r, g, b, mode, alpha, ax * (1.f - ay));
-        blendPixelCoverage(fb, ix,     iy + 1, r, g, b, mode, alpha, (1.f - ax) * ay);
-        blendPixelCoverage(fb, ix + 1, iy + 1, r, g, b, mode, alpha, ax * ay);
+        put(ix,     iy,     (1.f - ax) * (1.f - ay));
+        put(ix + 1, iy,     ax * (1.f - ay));
+        put(ix,     iy + 1, (1.f - ax) * ay);
+        put(ix + 1, iy + 1, ax * ay);
         return;
     }
     const float reach = radius + 0.5f;
@@ -128,8 +153,7 @@ void plotDotAA(Framebuffer& fb, float x, float y, float radius,
     for (int py = ya; py <= yb; ++py)
         for (int px = xa; px <= xb; ++px) {
             const float ex = px + 0.5f - x, ey = py + 0.5f - y;
-            blendPixelCoverage(fb, px, py, r, g, b, mode, alpha,
-                               std::clamp(reach - std::sqrt(ex * ex + ey * ey), 0.f, 1.f));
+            put(px, py, std::clamp(reach - std::sqrt(ex * ex + ey * ey), 0.f, 1.f));
         }
 }
 
@@ -189,6 +213,7 @@ void drawSegmentAA(Framebuffer& fb, float x0, float y0, float x1, float y1, floa
     const bool normalize = hw <= 1.51f;
     const CovBlendFn put = covBlendFor(mode);
     const float src[3] = {r, g, b};
+    Framebuffer* ov = mode == 1 ? overflowFor(fb) : nullptr;   // HDR: keep what clips
     const float major = xMajor ? std::fabs(dx) : std::fabs(dy);
     const float expect = 2.f * hw * len / major;
     auto infCoverage = [&](float cx, float cy) {
@@ -216,7 +241,9 @@ void drawSegmentAA(Framebuffer& fb, float x0, float y0, float x1, float y1, floa
             const int yb = std::min(fb.h - 1, (int)std::ceil(yc + span));
             for (int py = ya; py <= yb; ++py) {
                 const float c = coverage(px, py);
-                if (c > 0.f) put(fb.at(px, py), src, alpha, c * scale);
+                if (c <= 0.f) continue;
+                if (ov) addCoverageHdr(fb, *ov, px, py, src, c * scale);
+                else put(fb.at(px, py), src, alpha, c * scale);
             }
         }
     } else {
@@ -239,7 +266,9 @@ void drawSegmentAA(Framebuffer& fb, float x0, float y0, float x1, float y1, floa
             const int xb = std::min(fb.w - 1, (int)std::ceil(xc + span));
             for (int px = xa; px <= xb; ++px) {
                 const float c = coverage(px, py);
-                if (c > 0.f) put(fb.at(px, py), src, alpha, c * scale);
+                if (c <= 0.f) continue;
+                if (ov) addCoverageHdr(fb, *ov, px, py, src, c * scale);
+                else put(fb.at(px, py), src, alpha, c * scale);
             }
         }
     }

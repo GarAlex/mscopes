@@ -117,6 +117,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL highResolution;          // default YES
 @property (nonatomic) BOOL classicEnhanced;         // default NO (Authentic)
 @property (nonatomic, readonly) BOOL presetIsClassic;
+/// HDR highlights (built-in presets): light that clips at white is kept
+/// aside each frame and shown white-hot; on an extended-range (XDR) screen
+/// it shines above SDR white. Presets' own frames are unchanged. Default YES.
+@property (nonatomic) BOOL hdrHighlights;
 /// Load a .cube look. On success the look becomes the current one (lookIndex
 /// -1) and nil is returned; otherwise a short error message.
 - (nullable NSString *)loadCustomLookAtPath:(NSString *)path;

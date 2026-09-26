@@ -712,7 +712,15 @@ struct PicU {
     float scanlines, grain, bass, beat;
     float frame, pointScale, sharp, dither;
     float hasGlow, hasLook, beatReactive, glowLevels;
+    float hdr, peak, linearOut, hasOverflow;
 };
+
+// Display-encoded (sRGB curve) to linear light, extended above 1 for EDR.
+static float3 toLinearExt(float3 c)
+{
+    c = max(c, 0.0);
+    return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
 
 static uint hashu(uint x)
 {
@@ -764,6 +772,7 @@ fragment float4 pic_fs(VOut in [[stage_in]],
                        texture2d<float> src [[texture(0)]],
                        texture2d<float> glowTex [[texture(1)]],
                        texture3d<float> lut [[texture(2)]],
+                       texture2d<float> overflowTex [[texture(3)]],
                        constant PicU& u [[buffer(0)]])
 {
     constexpr sampler lin(filter::linear, address::clamp_to_edge);
@@ -780,12 +789,27 @@ fragment float4 pic_fs(VOut in [[stage_in]],
         // glow adds several times that, so thin lines and points visibly bloom.
         c += glowTex.sample(lin, uv).rgb * (g * 7.0 / max(u.glowLevels, 1.0));
     }
-    c = clamp(c, 0.0, 1.0);
+    // HDR highlights: the light that clipped this frame (overflow, never
+    // fed back). On an extended-range screen it becomes real brightness above
+    // white in its own hue, rolled off toward the peak; everywhere it turns
+    // the pixel white-hot. Pixels without overflow are exactly as in SDR.
+    if (u.hasOverflow > 0.5) {
+        float3 hot = max(overflowTex.sample(lin, uv).rgb, 0.0);
+        float h = max(hot.r, max(hot.g, hot.b));
+        if (h > 1e-4) {
+            if (u.peak > 1.001) c += hot * ((u.peak - 1.0) * (1.0 - exp(-h / (u.peak - 1.0))) / h);
+            float m = max(c.r, max(c.g, c.b));
+            c = mix(c, float3(m), (1.0 - exp(-h * 1.2)) * 0.85);
+        }
+    }
+    c = clamp(c, 0.0, u.linearOut > 0.5 ? u.peak : 1.0);
 
     if (u.hasLook > 0.5) {
+        // The look is defined on 0..1; light above white (EDR) passes through.
         float n = u.lookSize;
-        float3 lc = lut.sample(lin, c * ((n - 1.0) / n) + 0.5 / n).rgb;
-        c = mix(c, lc, u.lookStrength);
+        float3 base = min(c, 1.0), extra = c - base;
+        float3 lc = lut.sample(lin, base * ((n - 1.0) / n) + 0.5 / n).rgb;
+        c = mix(base, lc, u.lookStrength) + extra;
     }
 
     if (u.vignette > 0.0) {
@@ -800,7 +824,7 @@ fragment float4 pic_fs(VOut in [[stage_in]],
     if (u.grain > 0.0) {
         uint2 cell = uint2(in.pos.xy / ps);                 // one grain per point
         float n = rnd(cell, fr * 2u + 11u) + rnd(cell, fr * 2u + 12u) - 1.0;
-        float y = dot(c, float3(0.2126, 0.7152, 0.0722));
+        float y = min(dot(c, float3(0.2126, 0.7152, 0.0722)), 1.0);
         float w = 0.2 + 3.2 * y * (1.0 - y);                 // strongest in the midtones
         float g = u.grain * (1.0 + u.beatReactive * 0.6 * u.beat);
         c += n * g * 0.11 * w;
@@ -811,6 +835,8 @@ fragment float4 pic_fs(VOut in [[stage_in]],
         c *= 1.0 - u.scanlines * 0.5 * (1.0 - s);
     }
 
+    if (u.linearOut > 0.5)                                   // extended range: a float layer, no dither needed
+        return float4(toLinearExt(min(c, u.peak)), 1.0);
     if (u.dither > 0.5) {
         uint2 px = uint2(in.pos.xy);
         float n = rnd(px, fr * 3u + 1u) + rnd(px, fr * 3u + 2u) - 1.0;   // triangular, ±1 LSB
@@ -856,6 +882,45 @@ kernel void pic_down(texture2d<float, access::sample> src [[texture(0)]],
     dst.write(float4(box5(src, uv, u.srcTexel), 1.0), g);
 }
 
+// The in-stack Bloom effect's combine: frame + pyramid glow with the
+// effect's soft rolloff (1 - e^-x), as always. With HDR, the light above
+// white it rolled off is also added to the overflow buffer (ovIn → ovOut).
+struct BloomU { float gain; float hdr; float pad0; float pad1; };
+kernel void pic_bloom_add(texture2d<float, access::read> base [[texture(0)]],
+                          texture2d<float, access::sample> glow [[texture(1)]],
+                          texture2d<float, access::write> dst [[texture(2)]],
+                          texture2d<float, access::read> ovIn [[texture(3)]],
+                          texture2d<float, access::write> ovOut [[texture(4)]],
+                          constant BloomU& u [[buffer(0)]],
+                          uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    constexpr sampler lin(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height());
+    float3 x = max(base.read(g).rgb + glow.sample(lin, uv).rgb * u.gain, 0.0);
+    dst.write(float4(1.0 - exp(-x), 1.0), g);
+    if (u.hdr > 0.5) ovOut.write(float4(ovIn.read(g).rgb + max(x - 1.0, 0.0), 1.0), g);
+}
+
+// The in-stack Tone Map, HDR: the same SDR result, plus the exposed light
+// above white into the overflow buffer.
+kernel void pic_tonemap_hdr(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            texture2d<float, access::read> ovIn [[texture(2)]],
+                            texture2d<float, access::write> ovOut [[texture(3)]],
+                            constant float4& p [[buffer(0)]],
+                            uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    float3 x = max(src.read(g).rgb * p.x, 0.0);
+    float3 c = 1.0 - exp(-x);
+    c = pow(c, float3(p.y));
+    float lum = dot(c, float3(0.299, 0.587, 0.114));
+    c = mix(float3(lum), c, p.z);
+    dst.write(float4(clamp(c, 0.0, 1.0), 1.0), g);
+    ovOut.write(float4(ovIn.read(g).rgb + max(x - 1.0, 0.0), 1.0), g);
+}
+
 kernel void pic_up(texture2d<float, access::sample> coarse [[texture(0)]],
                    texture2d<float, access::read> fine [[texture(1)]],
                    texture2d<float, access::write> dst [[texture(2)]],
@@ -891,9 +956,13 @@ struct Ctx {
     NSDictionary<NSString*, id<MTLComputePipelineState>>* pipes = nil;
     // Picture pass (lazily built by present()/renderPicture()).
     id<MTLLibrary> picLib = nil;
-    id<MTLRenderPipelineState> picPipe = nil;
-    MTLPixelFormat picPipeFormat = MTLPixelFormatInvalid;
-    id<MTLComputePipelineState> picPrefilter = nil, picDown = nil, picUp = nil;
+    // One render pipeline per output format: the SDR layer (bgra8), the
+    // extended-range layer (rgba16Float), float readback for tests.
+    static constexpr int kPicFormats = 4;
+    id<MTLRenderPipelineState> picPipe[kPicFormats] = {};
+    MTLPixelFormat picPipeFormat[kPicFormats] = {};
+    id<MTLComputePipelineState> picPrefilter = nil, picDown = nil, picUp = nil, picBloomAdd = nil,
+                                picToneHdr = nil;
     static constexpr int kGlowMax = 6;
     id<MTLTexture> glowDown[kGlowMax] = {};
     id<MTLTexture> glowUp[kGlowMax] = {};
@@ -1181,60 +1250,75 @@ struct PicU {
     float scanlines, grain, bass, beat;
     float frame, pointScale, sharp, dither;
     float hasGlow, hasLook, beatReactive, glowLevels;
+    float hdr, peak, linearOut, hasOverflow;
 };
 struct GlowU { float tx, ty, threshold, knee; };
+struct BloomU { float gain, hdr, pad0, pad1; };
 
-static bool ensurePicture(Ctx* c, MTLPixelFormat fmt)
+// The picture library, its compute pipelines (glow pyramid, bloom) and the
+// dummy textures; shared by the picture pass and the in-stack Bloom.
+static bool ensurePictureCompute(Ctx* c)
 {
+    if (c->picLib) return c->picPrefilter && c->picDown && c->picUp && c->picBloomAdd && c->picToneHdr;
     NSError* err = nil;
-    if (!c->picLib) {
-        c->picLib = [c->dev newLibraryWithSource:@(kPictureShaders) options:nil error:&err];
-        if (!c->picLib) { NSLog(@"[gpu] picture shaders failed: %@", err); return false; }
-        auto comp = [&](NSString* name) -> id<MTLComputePipelineState> {
-            id<MTLFunction> fn = [c->picLib newFunctionWithName:name];
-            id<MTLComputePipelineState> ps = fn ? [c->dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+    c->picLib = [c->dev newLibraryWithSource:@(kPictureShaders) options:nil error:&err];
+    if (!c->picLib) { NSLog(@"[gpu] picture shaders failed: %@", err); return false; }
+    auto comp = [&](NSString* name) -> id<MTLComputePipelineState> {
+        id<MTLFunction> fn = [c->picLib newFunctionWithName:name];
+        id<MTLComputePipelineState> ps = fn ? [c->dev newComputePipelineStateWithFunction:fn error:&err] : nil;
 #if !__has_feature(objc_arc)
-            [fn release];
+        [fn release];
 #endif
-            if (!ps) NSLog(@"[gpu] picture pipeline %@ failed: %@", name, err);
-            return ps;
-        };
-        c->picPrefilter = comp(@"pic_prefilter");
-        c->picDown = comp(@"pic_down");
-        c->picUp = comp(@"pic_up");
-        if (!c->picPrefilter || !c->picDown || !c->picUp) return false;
+        if (!ps) NSLog(@"[gpu] picture pipeline %@ failed: %@", name, err);
+        return ps;
+    };
+    c->picPrefilter = comp(@"pic_prefilter");
+    c->picDown = comp(@"pic_down");
+    c->picUp = comp(@"pic_up");
+    c->picBloomAdd = comp(@"pic_bloom_add");
+    c->picToneHdr = comp(@"pic_tonemap_hdr");
+    if (!c->picPrefilter || !c->picDown || !c->picUp || !c->picBloomAdd || !c->picToneHdr) return false;
 
-        MTLTextureDescriptor* d2 = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:1 height:1 mipmapped:NO];
-        d2.usage = MTLTextureUsageShaderRead;
-        c->dummy2D = [c->dev newTextureWithDescriptor:d2];
-        MTLTextureDescriptor* d3 = [MTLTextureDescriptor new];
-        d3.textureType = MTLTextureType3D;
-        d3.pixelFormat = MTLPixelFormatRGBA16Float;
-        d3.width = d3.height = d3.depth = 1;
-        d3.usage = MTLTextureUsageShaderRead;
-        c->dummy3D = [c->dev newTextureWithDescriptor:d3];
+    MTLTextureDescriptor* d2 = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:1 height:1 mipmapped:NO];
+    d2.usage = MTLTextureUsageShaderRead;
+    c->dummy2D = [c->dev newTextureWithDescriptor:d2];
+    MTLTextureDescriptor* d3 = [MTLTextureDescriptor new];
+    d3.textureType = MTLTextureType3D;
+    d3.pixelFormat = MTLPixelFormatRGBA16Float;
+    d3.width = d3.height = d3.depth = 1;
+    d3.usage = MTLTextureUsageShaderRead;
+    c->dummy3D = [c->dev newTextureWithDescriptor:d3];
 #if !__has_feature(objc_arc)
-        [d3 release];
+    [d3 release];
 #endif
-        if (!c->dummy2D || !c->dummy3D) return false;
+    return c->dummy2D && c->dummy3D;
+}
+
+// The picture pass's render pipeline for an output format.
+static id<MTLRenderPipelineState> picturePipeline(Ctx* c, MTLPixelFormat fmt)
+{
+    if (!ensurePictureCompute(c)) return nil;
+    int freeSlot = -1;
+    for (int i = 0; i < Ctx::kPicFormats; ++i) {
+        if (c->picPipe[i] && c->picPipeFormat[i] == fmt) return c->picPipe[i];
+        if (!c->picPipe[i] && freeSlot < 0) freeSlot = i;
     }
-    if (!c->picPipe || c->picPipeFormat != fmt) {
-        if (c->picPipe) WV_RELEASE(c->picPipe);
-        MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
-        id<MTLFunction> vs = [c->picLib newFunctionWithName:@"pic_vs"];
-        id<MTLFunction> fs = [c->picLib newFunctionWithName:@"pic_fs"];
-        d.vertexFunction = vs;
-        d.fragmentFunction = fs;
-        d.colorAttachments[0].pixelFormat = fmt;
-        c->picPipe = [c->dev newRenderPipelineStateWithDescriptor:d error:&err];
+    if (freeSlot < 0) { freeSlot = 0; WV_RELEASE(c->picPipe[0]); }
+    NSError* err = nil;
+    MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
+    id<MTLFunction> vs = [c->picLib newFunctionWithName:@"pic_vs"];
+    id<MTLFunction> fs = [c->picLib newFunctionWithName:@"pic_fs"];
+    d.vertexFunction = vs;
+    d.fragmentFunction = fs;
+    d.colorAttachments[0].pixelFormat = fmt;
+    c->picPipe[freeSlot] = [c->dev newRenderPipelineStateWithDescriptor:d error:&err];
 #if !__has_feature(objc_arc)
-        [vs release]; [fs release]; [d release];
+    [vs release]; [fs release]; [d release];
 #endif
-        if (!c->picPipe) { NSLog(@"[gpu] picture render pipeline failed: %@", err); return false; }
-        c->picPipeFormat = fmt;
-    }
-    return true;
+    if (!c->picPipe[freeSlot]) { NSLog(@"[gpu] picture render pipeline failed: %@", err); return nil; }
+    c->picPipeFormat[freeSlot] = fmt;
+    return c->picPipe[freeSlot];
 }
 
 // The glow pyramid for a W x H frame: level 0 at half size, halving until
@@ -1316,7 +1400,8 @@ static void dispatch2D(id<MTLCommandBuffer> cb, id<MTLComputePipelineState> ps,
 // Encode the whole picture pass: the glow pyramid (if any) and the one
 // fragment pass into `rp`'s colour attachment.
 static void encodePicture(Ctx* c, id<MTLCommandBuffer> cb, id<MTLTexture> src, int sw, int sh,
-                          MTLRenderPassDescriptor* rp, int dw, int dh, const PictureSettings& s)
+                          MTLRenderPassDescriptor* rp, int dw, int dh, const PictureSettings& s,
+                          id<MTLRenderPipelineState> pipe)
 {
     const bool glow = s.glow > 0.001f && ensureGlow(c, sw, sh);
     if (glow) {
@@ -1338,6 +1423,9 @@ static void encodePicture(Ctx* c, id<MTLCommandBuffer> cb, id<MTLTexture> src, i
         }
     }
     const bool look = s.hasLook() && uploadLook(c, *s.look);
+    id<MTLTexture> ovTex = nil;
+    if (s.hdr && s.overflow && s.overflow->w == sw && s.overflow->h == sh)
+        ovTex = fbTexture(c, *s.overflow);
 
     PicU u = {};
     u.srcW = (float)sw; u.srcH = (float)sh; u.dstW = (float)dw; u.dstH = (float)dh;
@@ -1356,12 +1444,20 @@ static void encodePicture(Ctx* c, id<MTLCommandBuffer> cb, id<MTLTexture> src, i
     u.hasLook = look ? 1.f : 0.f;
     u.beatReactive = s.beatReactive ? 1.f : 0.f;
     u.glowLevels = (float)(glow ? c->glowLevels : 1);
+    // HDR: the peak in display-encoded units (sRGB curve of the linear
+    // headroom), capped at 4x white so highlights glow without glaring.
+    const float headroom = s.linearOutput ? std::clamp(s.headroom, 1.f, 4.f) : 1.f;
+    u.hdr = s.hdr ? 1.f : 0.f;
+    u.peak = headroom <= 1.f ? 1.f : 1.055f * std::pow(headroom, 1.f / 2.4f) - 0.055f;
+    u.linearOut = s.linearOutput ? 1.f : 0.f;
+    u.hasOverflow = ovTex ? 1.f : 0.f;
 
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-    [e setRenderPipelineState:c->picPipe];
+    [e setRenderPipelineState:pipe];
     [e setFragmentTexture:src atIndex:0];
     [e setFragmentTexture:(glow ? c->glowUp[0] : c->dummy2D) atIndex:1];
     [e setFragmentTexture:(look ? c->lutTex : c->dummy3D) atIndex:2];
+    [e setFragmentTexture:(ovTex ? ovTex : c->dummy2D) atIndex:3];
     [e setFragmentBytes:&u length:sizeof(u) atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [e endEncoding];
@@ -1375,7 +1471,8 @@ bool present(const Framebuffer& fb, void* layerPtr, const PictureSettings& pictu
     auto nowMs = [] { return (double)clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) * 1e-6; };
 
     @autoreleasepool {
-        if (!ensurePicture(c, layer.pixelFormat)) return false;
+        id<MTLRenderPipelineState> pipe = picturePipeline(c, layer.pixelFormat);
+        if (!pipe) return false;
 
         double t0 = nowMs();
         id<MTLTexture> R = fbTexture(c, fb);       // zero-copy view of the frame
@@ -1399,7 +1496,7 @@ bool present(const Framebuffer& fb, void* layerPtr, const PictureSettings& pictu
         // tick, so this is where the frame's work is finally waited for.
         id<MTLCommandBuffer> cb = c->cb();
         encodePicture(c, cb, R, fb.w, fb.h, rp,
-                      (int)drawable.texture.width, (int)drawable.texture.height, picture);
+                      (int)drawable.texture.width, (int)drawable.texture.height, picture, pipe);
         [cb presentDrawable:drawable];
         double t3 = nowMs();
         c->flush();
@@ -1408,23 +1505,27 @@ bool present(const Framebuffer& fb, void* layerPtr, const PictureSettings& pictu
     return true;
 }
 
-bool renderPicture(const Framebuffer& fb, const PictureSettings& picture,
-                   int outW, int outH, std::vector<uint8_t>& rgba)
+// Offscreen picture pass into `fmt`, read back row-flipped so row 0 is the
+// framebuffer's row 0. BGRA8 → rgba8 bytes; RGBA32Float → floats.
+static bool renderPictureTo(const Framebuffer& fb, const PictureSettings& picture, int outW, int outH,
+                            MTLPixelFormat fmt, std::vector<uint8_t>* bytes, std::vector<float>* floats)
 {
     Ctx* c = ctx();
     if (!c || c->broken || fb.w == 0 || fb.h == 0 || outW <= 0 || outH <= 0) return false;
     bool ok = false;
     @autoreleasepool {
-        if (!ensurePicture(c, MTLPixelFormatBGRA8Unorm)) return false;
+        id<MTLRenderPipelineState> pipe = picturePipeline(c, fmt);
+        if (!pipe) return false;
         id<MTLTexture> R = fbTexture(c, fb);
         if (!R) return false;
+        const bool isFloat = fmt == MTLPixelFormatRGBA32Float;
+        const NSUInteger px = isFloat ? 16 : 4;
         MTLTextureDescriptor* td = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                         width:(NSUInteger)outW height:(NSUInteger)outH mipmapped:NO];
+            texture2DDescriptorWithPixelFormat:fmt width:(NSUInteger)outW height:(NSUInteger)outH mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget;
         td.storageMode = MTLStorageModePrivate;
         id<MTLTexture> target = [c->dev newTextureWithDescriptor:td];
-        const NSUInteger rowBytes = (NSUInteger)outW * 4;
+        const NSUInteger rowBytes = (NSUInteger)outW * px;
         id<MTLBuffer> readback = [c->dev newBufferWithLength:rowBytes * (NSUInteger)outH
                                                      options:MTLResourceStorageModeShared];
         if (target && readback) {
@@ -1433,7 +1534,7 @@ bool renderPicture(const Framebuffer& fb, const PictureSettings& picture,
             rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             id<MTLCommandBuffer> cb = c->cb();
-            encodePicture(c, cb, R, fb.w, fb.h, rp, outW, outH, picture);
+            encodePicture(c, cb, R, fb.w, fb.h, rp, outW, outH, picture, pipe);
             id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
             [b copyFromTexture:target sourceSlice:0 sourceLevel:0
                   sourceOrigin:MTLOriginMake(0, 0, 0)
@@ -1444,24 +1545,48 @@ bool renderPicture(const Framebuffer& fb, const PictureSettings& picture,
             c->flush();
             // The render target's row 0 is the top of the image, where the
             // framebuffer keeps its last row: flip so row 0 matches fb row 0.
-            rgba.resize((size_t)outW * outH * 4);
             const uint8_t* p = (const uint8_t*)readback.contents;
-            for (int y = 0; y < outH; ++y) {
-                const uint8_t* srow = p + (size_t)(outH - 1 - y) * rowBytes;
-                uint8_t* drow = rgba.data() + (size_t)y * rowBytes;
-                for (int x = 0; x < outW; ++x) {
-                    drow[x * 4 + 0] = srow[x * 4 + 2];
-                    drow[x * 4 + 1] = srow[x * 4 + 1];
-                    drow[x * 4 + 2] = srow[x * 4 + 0];
-                    drow[x * 4 + 3] = 255;
+            if (isFloat && floats) {
+                floats->resize((size_t)outW * outH * 4);
+                for (int y = 0; y < outH; ++y)
+                    std::memcpy(floats->data() + (size_t)y * outW * 4,
+                                p + (size_t)(outH - 1 - y) * rowBytes, rowBytes);
+                ok = true;
+            } else if (!isFloat && bytes) {
+                bytes->resize((size_t)outW * outH * 4);
+                for (int y = 0; y < outH; ++y) {
+                    const uint8_t* srow = p + (size_t)(outH - 1 - y) * rowBytes;
+                    uint8_t* drow = bytes->data() + (size_t)y * rowBytes;
+                    for (int x = 0; x < outW; ++x) {
+                        drow[x * 4 + 0] = srow[x * 4 + 2];
+                        drow[x * 4 + 1] = srow[x * 4 + 1];
+                        drow[x * 4 + 2] = srow[x * 4 + 0];
+                        drow[x * 4 + 3] = 255;
+                    }
                 }
+                ok = true;
             }
-            ok = true;
         }
         if (target) WV_RELEASE(target);
         if (readback) WV_RELEASE(readback);
     }
     return ok;
+}
+
+bool renderPicture(const Framebuffer& fb, const PictureSettings& picture,
+                   int outW, int outH, std::vector<uint8_t>& rgba)
+{
+    PictureSettings s = picture;
+    s.linearOutput = false;                     // an 8-bit image: the SDR path
+    return renderPictureTo(fb, s, outW, outH, MTLPixelFormatBGRA8Unorm, &rgba, nullptr);
+}
+
+bool renderPictureLinear(const Framebuffer& fb, const PictureSettings& picture,
+                         int outW, int outH, std::vector<float>& rgba)
+{
+    PictureSettings s = picture;
+    s.linearOutput = true;                      // what an extended-range layer receives
+    return renderPictureTo(fb, s, outW, outH, MTLPixelFormatRGBA32Float, nullptr, &rgba);
 }
 
 // ---------------------------------------------------------------------------
@@ -1647,20 +1772,58 @@ void convolve5(Framebuffer& fb, const float k[25], float invScale, float bias,
 // ---------------------------------------------------------------------------
 //  Ops
 // ---------------------------------------------------------------------------
-void bloom(Framebuffer& fb, float threshold, float radius, float intensity)
+void bloom(Framebuffer& fb, float threshold, float radius, float intensity, Framebuffer* overflow)
 {
+    // A multi-scale pyramid (the picture pass's glow chain, shared: both run
+    // in order in one command buffer): soft-threshold prefilter, box
+    // downsample to a depth set by the radius, tent upsample-and-add, then
+    // frame + glow through the effect's soft rolloff. With an overflow
+    // buffer (HDR) the light the rolloff removed above white is kept there.
     Ctx* c; id<MTLTexture> R = beginOp(c, fb);
-    if (!R) return;
+    if (!R || !ensurePictureCompute(c) || !ensureGlow(c, fb.w, fb.h)) return;
+    id<MTLTexture> OV = (overflow && overflow->w == fb.w && overflow->h == fb.h) ? fbTexture(c, *overflow) : nil;
     @autoreleasepool {
+        const int L = std::clamp((int)std::lround(std::log2(std::max(2.f, radius))), 2, c->glowLevels);
+        id<MTLCommandBuffer> cb = c->cb();
+        const float t = std::clamp(threshold, 0.f, 4.f);
+        GlowU pu = { 1.f / fb.w, 1.f / fb.h, t, std::max(0.05f, t * 0.5f) };
+        dispatch2D(cb, c->picPrefilter, R, c->glowDown[0], nil, pu);
+        for (int i = 1; i < L; ++i) {
+            id<MTLTexture> prev = c->glowDown[i - 1];
+            GlowU d = { 1.f / prev.width, 1.f / prev.height, 0, 0 };
+            dispatch2D(cb, c->picDown, prev, c->glowDown[i], nil, d);
+        }
+        id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+        [bl copyFromTexture:c->glowDown[L - 1] toTexture:c->glowUp[L - 1]];
+        [bl endEncoding];
+        for (int i = L - 2; i >= 0; --i) {
+            id<MTLTexture> coarse = c->glowUp[i + 1];
+            GlowU d = { 1.f / coarse.width, 1.f / coarse.height, 0, 0 };
+            dispatch2D(cb, c->picUp, coarse, c->glowDown[i], c->glowUp[i], d);
+        }
+        // Combine into scratch (A = frame, B = overflow), copy both back.
         id<MTLTexture> A = c->tex[0], B = c->tex[1];
-        float sigma = std::max(0.5f, radius * 0.5f);
-        float taps = std::min(63.f, std::ceil(radius));
-        Pass p[4];
-        p[0] = {@"fx_threshold", R, nil, A, {threshold}, 1};
-        p[1] = {@"fx_blur", A, nil, B, {sigma, taps, 1, 0}, 4};
-        p[2] = {@"fx_blur", B, nil, A, {sigma, taps, 0, 1}, 4};
-        p[3] = {@"fx_bloom_combine", R, A, B, {intensity}, 1};
-        run(c, p, 4, fb.w, fb.h, B, R);
+        BloomU bu = { intensity * 2.2f / (float)L, OV ? 1.f : 0.f, 0, 0 };
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:c->picBloomAdd];
+        [e setTexture:R atIndex:0];
+        [e setTexture:c->glowUp[0] atIndex:1];
+        [e setTexture:A atIndex:2];
+        [e setTexture:(OV ? OV : R) atIndex:3];
+        [e setTexture:B atIndex:4];
+        [e setBytes:&bu length:sizeof(bu) atIndex:0];
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)fb.w + 15) / 16, ((NSUInteger)fb.h + 15) / 16, 1)
+          threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        [e endEncoding];
+        id<MTLBlitCommandEncoder> b2 = [cb blitCommandEncoder];
+        const MTLSize sz = MTLSizeMake((NSUInteger)fb.w, (NSUInteger)fb.h, 1);
+        [b2 copyFromTexture:A sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:sz
+                  toTexture:R destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        if (OV)
+            [b2 copyFromTexture:B sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:sz
+                      toTexture:OV destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [b2 endEncoding];
+        if (++c->pendingOps >= 64) c->flush();
     }
 }
 
@@ -1690,9 +1853,42 @@ void rgbSplit(Framebuffer& fb, float amountPx, float angle)
     onePass(fb, @"fx_rgbsplit", {amountPx * std::cos(angle), amountPx * std::sin(angle)});
 }
 
-void toneMap(Framebuffer& fb, float exposure, float gamma, float saturation)
+void toneMap(Framebuffer& fb, float exposure, float gamma, float saturation, Framebuffer* overflow)
 {
-    onePass(fb, @"fx_tonemap", {exposure, 1.0f / std::max(0.1f, gamma), saturation});
+    const float ig = 1.0f / std::max(0.1f, gamma);
+    if (!overflow || overflow->w != fb.w || overflow->h != fb.h) {
+        onePass(fb, @"fx_tonemap", {exposure, ig, saturation});
+        return;
+    }
+    // HDR: the same result, plus the exposed light above white kept in the
+    // overflow buffer (frame → A, overflow → B, both copied back).
+    Ctx* c; id<MTLTexture> R = beginOp(c, fb);
+    if (!R || !ensurePictureCompute(c)) return;
+    id<MTLTexture> OV = fbTexture(c, *overflow);
+    if (!OV) return;
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = c->cb();
+        id<MTLTexture> A = c->tex[0], B = c->tex[1];
+        const float p[4] = {exposure, ig, saturation, 0};
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:c->picToneHdr];
+        [e setTexture:R atIndex:0];
+        [e setTexture:A atIndex:1];
+        [e setTexture:OV atIndex:2];
+        [e setTexture:B atIndex:3];
+        [e setBytes:p length:sizeof(p) atIndex:0];
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)fb.w + 15) / 16, ((NSUInteger)fb.h + 15) / 16, 1)
+          threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        [e endEncoding];
+        id<MTLBlitCommandEncoder> b2 = [cb blitCommandEncoder];
+        const MTLSize sz = MTLSizeMake((NSUInteger)fb.w, (NSUInteger)fb.h, 1);
+        [b2 copyFromTexture:A sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:sz
+                  toTexture:R destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [b2 copyFromTexture:B sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:sz
+                  toTexture:OV destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [b2 endEncoding];
+        if (++c->pendingOps >= 64) c->flush();
+    }
 }
 
 void vignette(Framebuffer& fb, float inner, float outer, float strength)

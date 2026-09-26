@@ -16,6 +16,7 @@ void syncToCpu(Framebuffer&) {}
 void syncToCpuForRead(const Framebuffer&) {}
 bool present(const Framebuffer&, void*, const PictureSettings&) { return false; }
 bool renderPicture(const Framebuffer&, const PictureSettings&, int, int, std::vector<uint8_t>&) { return false; }
+bool renderPictureLinear(const Framebuffer&, const PictureSettings&, int, int, std::vector<float>&) { return false; }
 void lastPresentTimes(double* a, double* b, double* c) { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; }
 
 void movement(Framebuffer&, int, bool, bool, int) {}
@@ -29,7 +30,7 @@ void distanceModifier(Framebuffer&, const float*, int, bool, bool) {}
 void colorOp(Framebuffer&, int, const float*, int, const float*, int) {}
 bool blend(Framebuffer&, const Framebuffer&, int, float) { return false; }
 
-void bloom(Framebuffer&, float, float, float) {}
+void bloom(Framebuffer&, float, float, float, Framebuffer*) {}
 void kaleidoscope(Framebuffer&, int, float, float) {}
 void rgbSplit(Framebuffer&, float, float) {}
 void shockwave(Framebuffer&, const float*, float, float) {}
@@ -41,7 +42,7 @@ void edges(Framebuffer&, float, float, float, float, float) {}
 void duotone(Framebuffer&, const float*, const float*, float) {}
 void shimmer(Framebuffer&, float, float, float) {}
 void crt(Framebuffer&, float, float, float, float) {}
-void toneMap(Framebuffer&, float, float, float) {}
+void toneMap(Framebuffer&, float, float, float, Framebuffer*) {}
 void vignette(Framebuffer&, float, float, float) {}
 bool runCustomKernel(Framebuffer&, const std::string&, const float*, int, std::string* err)
 {

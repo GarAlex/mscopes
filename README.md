@@ -42,6 +42,9 @@ silicon and Intel); all versions on the
   too, and presets render at the screen's full resolution when they hold
   60 fps there. Classic presets stay pixel-exact AVS ("Authentic") unless
   you switch them to "Enhanced".
+- **HDR highlights.** Light that would clip at white turns white-hot instead,
+  and on XDR screens it shines brighter than white. It lives only in what
+  reaches the screen, so presets evolve exactly as before.
 - **A GPU engine.** Zero-copy Metal backend over the framebuffer's own memory,
   deferred command buffers, the hot classic effects ported to compute kernels
   with the CPU loops as fallback. A steady 60 fps, paced by the display.
