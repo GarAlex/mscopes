@@ -261,6 +261,8 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     BOOL                  _presetIsClassic;
     BOOL                  _highResBlocked;   // this preset missed the frame budget at high res
     BOOL                  _hdrHighlights;
+    int                   _hits[3];          // kick/snare/hat hits since the last heartbeat
+    float                 _att[3];           // slow lows/mids/highs of the latest frame
     double                _renderMsAvg;
     int                   _overBudgetFrames;
     viz::Analyzer         _analyzer;
@@ -741,7 +743,10 @@ static bool wvProcessRunningOutput(AudioObjectID proc)
     slot->quietChecks = 0;
     slot->peak.store(0.f);
     slot->hadSignal.store(false);
-    if (_sampleRate <= 0) { _sampleRate = slot->tap->sampleRate(); _channels = slot->tap->channels(); }
+    if (_sampleRate <= 0) {
+        _sampleRate = slot->tap->sampleRate(); _channels = slot->tap->channels();
+        _analyzer.setSampleRate(_sampleRate);
+    }
     return YES;
 }
 
@@ -1014,8 +1019,11 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
     if ((++n % 20) == 0)
     {
         double dr, ar; wvRates(&dr, &ar, (!_slots.empty() && _slots[0]->tap) ? _slots[0]->tap->aggregateID() : kAudioObjectUnknown);
-        wvLog("heartbeat: cbs=%llu frames=%llu peak=%.3f in=%.3f bpm=%.0f taps=%zu tapRestarts=%ld linkRestarts=%ld device %.0f Hz agg %.0f Hz",
-              _cbs.load(), _frames, _peak, _inPeak.load(), _bpm, _slots.size(), (long)_tapRestarts, (long)_linkRestarts, dr, ar);
+        wvLog("heartbeat: cbs=%llu frames=%llu peak=%.3f in=%.3f bpm=%.0f hits kick/snare/hat %d/%d/%d bands lo/mid/hi %.2f/%.2f/%.2f taps=%zu tapRestarts=%ld linkRestarts=%ld device %.0f Hz agg %.0f Hz",
+              _cbs.load(), _frames, _peak, _inPeak.load(), _bpm, _hits[0], _hits[1], _hits[2],
+              _att[0], _att[1], _att[2],
+              _slots.size(), (long)_tapRestarts, (long)_linkRestarts, dr, ar);
+        _hits[0] = _hits[1] = _hits[2] = 0;
     }
 }
 
@@ -1045,6 +1053,7 @@ static void wvRates(double* deviceRate, double* aggRate, AudioObjectID agg)
             return NO;
         }
         _sampleRate = probe.sampleRate(); _channels = probe.channels();
+        _analyzer.setSampleRate(_sampleRate);
         probe.stop();
     }
 
@@ -1169,6 +1178,19 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     viz::VizFrame f;
     _analyzer.analyze(f);
     _bpm = f.bpm;
+    _hits[0] += f.kickHit; _hits[1] += f.snareHit; _hits[2] += f.hatHit;
+    _att[0] = f.bassAtt; _att[1] = f.midAtt; _att[2] = f.trebleAtt;
+    {   // MSCOPES_DEBUG_ONSETS=1: every drum candidate and why, to engine.log
+        static const bool dbg = getenv("MSCOPES_DEBUG_ONSETS") != nullptr;
+        if (dbg) {
+            viz::AudioFeatures& fx = _analyzer.features();
+            fx.debugCandidates = true;
+            for (const auto& c : fx.takeCandidates())
+                wvLog("onset %c t=%.3f %s own=%.5f nk=%.5f ns=%.5f nh=%.5f spread=%.2f z=%.1f zS=%.1f zH=%.1f jump=%.1f",
+                      c.kind, c.t, c.accepted ? "HIT " : "skip", c.own, c.nk, c.ns, c.nh, c.spread,
+                      c.zOwn, c.zS, c.zH, c.lowJump);
+        }
+    }
     _beatLevel = f.beat ? 1.f : _beatLevel * 0.85f;   // ~200 ms visible flash
     _pic.beat = _beatLevel;
     _pic.bass = std::min(1.f, f.bass * 1.6f);
@@ -1183,7 +1205,10 @@ static CVReturn wvDisplayLinkFired(CVDisplayLinkRef, const CVTimeStamp*, const C
     }
 
     _peak = f.peakSpectrum(); _bass = f.bass; _mid = f.mid; _treble = f.treble;
-    {   // 32 log-spaced bands over bins 1..kSpectrumBins for small meters
+    if (f.hasFeatures) {   // the analyzer's log bands (each auto-gained) for small meters
+        static_assert(viz::kBands == 32, "meters show 32 bands");
+        for (int b = 0; b < 32; ++b) _bands[b] = f.bands[b];
+    } else {   // 32 log-spaced bands over bins 1..kSpectrumBins
         const float lo = 1.f, hi = (float)viz::kSpectrumBins;
         for (int b = 0; b < 32; ++b) {
             int i0 = (int)(lo * std::pow(hi / lo, b / 32.f));

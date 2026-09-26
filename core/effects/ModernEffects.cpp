@@ -16,7 +16,7 @@ void TrailsEffect::render(Framebuffer& cur, const Framebuffer& prev,
 {
     if (cur.px.size() != prev.px.size() || cur.px.empty()) return;
 
-    if (a.beat) _flash = beatFlash;
+    if (onBeat(a)) _flash = beatFlash;
     _flash *= std::pow(0.05, ctx.dt);
     float p = std::clamp(persistence - (float)_flash, 0.f, 0.98f);
     if (p <= 0.f) return;
@@ -67,7 +67,7 @@ void ParticleSystemEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     const size_t cap = (size_t)std::clamp((int)maxCount, 32, 4000);
 
     // --- emit ---
-    _emitCarry += emitRate * dt + (a.beat ? beatBurst : 0.f);
+    _emitCarry += emitRate * dt + (onBeat(a) ? beatBurst : 0.f);
     int born = (int)_emitCarry;
     _emitCarry -= born;
     float v0 = speed * (1.f + speedBass * a.bass);
@@ -115,6 +115,107 @@ void ParticleSystemEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
                 addLight(cur, cx + dx, cy + dy, rgb[0] * fall, rgb[1] * fall, rgb[2] * fall);
             }
     }
+}
+
+} // namespace viz
+
+// ---------------------------------------------------------------------------
+namespace viz {
+
+void VectorscopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
+                               const VizFrame& a, const EffectContext& ctx)
+{
+    const int W = cur.w, H = cur.h;
+    if (W == 0 || H == 0) return;
+
+    // Every sample since the previous frame; a source without them gives
+    // only the newest window, which overlaps the last one, so the beam
+    // isn't joined across frames then.
+    const float* L; const float* R; int n;
+    if (a.hasFeatures && a.recentCount > 1) { L = a.recent[0]; R = a.recent[1]; n = a.recentCount; }
+    else { L = a.waveform[0]; R = a.waveform[1]; n = kWaveformSamples; _haveLast = false; }
+
+    const double dt = std::max(1e-3, ctx.dt);
+    const bool phase = mode > 0.5f;
+    const int d = std::clamp((int)delay, 1, 200);
+
+    // The beam: stereo (left, right) or phase (the signal, and itself d
+    // samples earlier), through a gentle low-pass like a real scope's
+    // limited bandwidth, so hiss and cymbals don't scatter it. Then turned
+    // 45° (mid up, side across).
+    std::vector<float>& xs = _xs;
+    std::vector<float>& ys = _ys;
+    xs.resize((size_t)n); ys.resize((size_t)n);
+    const float lpA = 1.f - (float)std::exp(-2.0 * M_PI * 1500.0 / 48000.0);
+    float pk = 0.f;
+    double sX = 0.0, sY = 0.0;
+    for (int i = 0; i < n; ++i) {
+        float u, v;
+        if (phase) {
+            u = 0.5f * (L[i] + R[i]);
+            v = i >= d ? 0.5f * (L[i - d] + R[i - d]) : _hist[256 - d + i];
+        } else {
+            u = L[i]; v = R[i];
+        }
+        pk = std::max(pk, std::max(std::fabs(u), std::fabs(v)));
+        _lpU += lpA * (u - _lpU);
+        _lpV += lpA * (v - _lpV);
+        xs[(size_t)i] = (_lpU - _lpV) * 0.70710678f;
+        ys[(size_t)i] = (_lpU + _lpV) * 0.70710678f;
+        sX += (double)xs[(size_t)i] * xs[(size_t)i];
+        sY += (double)ys[(size_t)i] * ys[(size_t)i];
+    }
+    // Phase mode reaches back up to 200 samples into the previous frame.
+    for (int j = 0; j < 256; ++j) {
+        int i = n - 256 + j;
+        _hist[j] = i >= 0 ? 0.5f * (L[i] + R[i]) : _hist[std::min(255, j + n)];
+    }
+    if (pk < 0.003f) { _haveLast = false; return; }       // silence: no beam
+
+    // Follow the level: the RMS of each axis, smoothed over about half a
+    // second, fills the scope to about half its radius, so music
+    // (not its loudest transient) sets the size and peaks reach the edge.
+    // Phase mode scales its axes separately, since low notes barely open
+    // the loop sideways; stereo keeps one scale, so the width reads true.
+    const float rX = (float)std::sqrt(sX / n), rY = (float)std::sqrt(sY / n);
+    const float a0 = 1.f - (float)std::exp(-dt / 0.5);
+    _peakX += ((phase ? rX : std::max(rX, rY)) - _peakX) * a0;
+    _peakY += ((phase ? rY : std::max(rX, rY)) - _peakY) * a0;
+    _peakX = std::max(_peakX, 0.003f); _peakY = std::max(_peakY, 0.003f);
+    const float half = 0.5f * (float)std::min(W, H) * size;
+    const float sx = (normalize > 0.5f ? 0.45f / _peakX : 1.f) * half;
+    const float sy = (normalize > 0.5f ? 0.45f / _peakY : 1.f) * half;
+    const float cx = W * 0.5f, cy = H * 0.5f;
+    auto point = [&](int i, float& x, float& y) {
+        x = cx + xs[(size_t)i] * sx;
+        y = cy - ys[(size_t)i] * sy;
+    };
+
+    float rgb[3];
+    hue2rgb(hue + hueSpeed * (float)ctx.time, rgb);
+    for (float& c : rgb) c = 0.25f + 0.75f * c;             // phosphor: a little white in every hue
+    const float hw = 0.5f * width * std::max(0.25f, drawQuality().widthScale);
+    // The beam spends 1/rate on each segment: the longer the segment, the
+    // thinner its light on each pixel.
+    const float k = 3.f * gain * std::max(1.f, drawQuality().widthScale);
+
+    float px, py, ppx = 0.f, ppy = 0.f;
+    int i0 = 0;
+    if (_haveLast) { px = _lx; py = _ly; }
+    else { point(0, px, py); i0 = 1; }
+    bool first = true;
+    for (int i = i0; i < n; ++i) {
+        float x, y;
+        point(i, x, y);
+        const float len = std::hypot(x - px, y - py);
+        const float e = std::min(k / std::max(len, 0.7f), 1.5f);
+        const bool capStart = first || sharpTurn(ppx, ppy, px, py, x, y);
+        drawSegmentAA(cur, px, py, x, y, hw, rgb[0] * e, rgb[1] * e, rgb[2] * e,
+                      /*additive*/1, 1.f, capStart, i == n - 1);
+        ppx = px; ppy = py; px = x; py = y;
+        first = false;
+    }
+    _lx = px; _ly = py; _haveLast = a.hasFeatures && a.recentCount > 1;
 }
 
 } // namespace viz

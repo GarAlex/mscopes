@@ -13,6 +13,7 @@
 #pragma once
 #include "Effect.h"
 #include "EelVM.h"
+#include "AudioVars.h"
 #include <memory>
 #include <string>
 
@@ -59,6 +60,7 @@ private:
 
     std::unique_ptr<eel::VM> _vm;
     eel::Program _pInit, _pFrame, _pBeat, _pPoint;
+    AudioVars _audioVars;              // kick, snare, hat, … (AudioVars.h)
     std::string _sInit, _sFrame, _sBeat, _sPoint;
     int _compiledExample = -999;
     bool _scriptsDirty = false;

@@ -508,6 +508,16 @@ double Program::eval(int idx) const
     }
 }
 
+bool Program::assigns(const double* slot) const
+{
+    for (const Node& n : _nodes) {
+        if (n.op == OP_ASSIGN && n.slot == slot) return true;
+        if (n.op == OP_CALL && n.fn == FN_ASSIGN && n.a >= 0
+            && _nodes[(size_t)n.a].op == OP_VAR && _nodes[(size_t)n.a].slot == slot) return true;
+    }
+    return false;
+}
+
 void Program::run() const
 {
     if (!ok()) return;

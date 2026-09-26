@@ -30,6 +30,7 @@ public:
                 {"spin", -0.08f, 0.08f, &spin},
                 {"spin_treble", 0.f, 0.08f, &spinTreble},
                 {"beat_kick", 0.f, 0.10f, &beatKick},
+                {"trigger", 0.f, 3.f, &trigger},
                 {"decay", 0.75f, 1.0f, &decay}};
     }
 };
@@ -89,7 +90,8 @@ public:
 
     std::vector<Param> params() override {
         return {{"palette", 0.f, 3.f, &palette},
-                {"cycle_on_beat", 0.f, 1.f, &cycleOnBeat}};
+                {"cycle_on_beat", 0.f, 1.f, &cycleOnBeat},
+                {"trigger", 0.f, 3.f, &trigger}};
     }
 
 private:

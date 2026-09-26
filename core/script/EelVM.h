@@ -109,6 +109,10 @@ public:
 
     void run() const;              // execute all statements in order
 
+    // True if any statement assigns the variable at `slot` (x = ..., or
+    // assign(x, ...)): the script treats that name as its own.
+    bool assigns(const double* slot) const;
+
     // AST access for tooling (EEL→MSL transpiler).
     const std::vector<Node>& nodes() const { return _nodes; }
     const std::vector<int>& stmts() const { return _stmts; }

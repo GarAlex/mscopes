@@ -50,6 +50,7 @@ public:
         return {{"segments", 2.f, 16.f, &segments},
                 {"spin", -2.f, 2.f, &spin},
                 {"spin_beat", 0.f, 2.f, &spinBeat},
+                {"trigger", 0.f, 3.f, &trigger},
                 {"zoom", 0.5f, 2.f, &zoom}};
     }
 
@@ -73,7 +74,8 @@ public:
     std::vector<Param> params() override {
         return {{"amount", 0.f, 24.f, &amount},
                 {"angle", 0.f, 6.2832f, &angle},
-                {"beat_pump", 0.f, 24.f, &beatPump}};
+                {"beat_pump", 0.f, 24.f, &beatPump},
+                {"trigger", 0.f, 3.f, &trigger}};
     }
 
 private:
@@ -136,7 +138,8 @@ public:
         return {{"speed", 0.3f, 4.f, &speed},
                 {"width", 0.02f, 0.3f, &width},
                 {"strength", 0.f, 0.2f, &strength},
-                {"bass_gate", 0.f, 1.f, &bassGate}};
+                {"bass_gate", 0.f, 1.f, &bassGate},
+                {"trigger", 0.f, 3.f, &trigger}};
     }
 
 private:
@@ -163,7 +166,8 @@ public:
                 {"decay", 0.5f, 12.f, &decay},
                 {"constant", 0.f, 1.f, &constant},
                 {"block_size", 4.f, 64.f, &blockSize},
-                {"tear", 0.f, 24.f, &tear}};
+                {"tear", 0.f, 24.f, &tear},
+                {"trigger", 0.f, 3.f, &trigger}};
     }
 
 private:
@@ -228,6 +232,7 @@ public:
     std::vector<Param> params() override {
         return {{"amount", 0.f, 1.f, &amount},
                 {"beat_pump", 0.f, 1.f, &beatPump},
+                {"trigger", 0.f, 3.f, &trigger},
                 {"quality", 4.f, 32.f, &quality}};
     }
 

@@ -72,6 +72,7 @@ void SuperscopeEffect::rebuild(int w, int h)
     _pFrame = eel::compile(*_vm, _sFrame);
     _pBeat  = eel::compile(*_vm, _sBeat);
     _pPoint = eel::compile(*_vm, _sPoint);
+    _audioVars.bind(*_vm, {&_pInit, &_pFrame, &_pBeat, &_pPoint});
 
     _pInit.run();
     _scriptsDirty = false;
@@ -110,6 +111,7 @@ void SuperscopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     *_vm->var("treb") = a.treble;
     *_vm->var("bpm") = a.bpm;
     *_vm->var("beatphase") = a.beatPhase;
+    _audioVars.set(a);
 
     if (a.beat) _pBeat.run();
     _pFrame.run();

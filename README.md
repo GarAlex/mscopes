@@ -30,7 +30,8 @@ silicon and Intel); all versions on the
   Text, Picture, video, external DLLs) load and render.
 - **Modern effects on the same stack.** Bloom, kaleidoscope, chromatic
   aberration, shockwave, glitch, anamorphic streaks, lens, radial blur, edge
-  glow, duotone, heat shimmer, CRT, tone mapping, vignette — and
+  glow, duotone, heat shimmer, CRT, tone mapping, vignette, a phosphor
+  vectorscope — and
   `pixel_shader`: EEL scripts transpiled to Metal and run per pixel.
 - **Picture looks.** Colour looks (Warm, Cold, Sepia, Teal & Orange, Noir,
   Bleach bypass, Faded film, Vivid, or your own `.cube` file), glow, film
@@ -48,8 +49,11 @@ silicon and Intel); all versions on the
 - **A GPU engine.** Zero-copy Metal backend over the framebuffer's own memory,
   deferred command buffers, the hot classic effects ported to compute kernels
   with the CPU loops as fallback. A steady 60 fps, paced by the display.
-- **Beat detection.** Energy-flux onsets, BPM estimate and beat phase from the
-  live signal, exposed to scripts the way AVS presets expect.
+- **Audio analysis.** The beat, BPM and beat phase AVS presets expect, plus
+  separate kick, snare and hi-hat hits, 32 log-spaced bands that each set
+  their own gain, a triggered waveform that holds a steady tone still, and
+  every sample since the last frame. Modern effects can react to a chosen
+  drum, and scripts read the new values as variables.
 - **Apple Music plugin.** A visualizer inside Music, installed with one click
   from the app. Today it runs the bar/waveform renderer with the shared beat
   detector; the preset engine is linked in but not yet routed to it.

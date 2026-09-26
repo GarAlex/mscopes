@@ -35,7 +35,34 @@ struct ParametersSection: View {
         }
     }
 
+    @ViewBuilder
     private func paramRow(_ p: EngineModel.ParamEntry) -> some View {
+        if p.key == "trigger" { triggerRow(p) } else { sliderRow(p) }
+    }
+
+    /// Which hit sets off the effect's on-beat reaction.
+    private func triggerRow(_ p: EngineModel.ParamEntry) -> some View {
+        HStack(spacing: 8) {
+            Text("on").font(.caption2)
+                .frame(width: 82, alignment: .leading)
+                .foregroundStyle(Color.secondary)
+            Picker("", selection: Binding(
+                get: { Int(p.value.rounded()) },
+                set: { model.setParam(p.key, Float($0)) }
+            )) {
+                Text("Beat").tag(0)
+                Text("Kick").tag(1)
+                Text("Snare").tag(2)
+                Text("Hat").tag(3)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.mini)
+        }
+        .help("What sets off this effect's on-beat reaction: the beat, or one drum")
+    }
+
+    private func sliderRow(_ p: EngineModel.ParamEntry) -> some View {
         let isInt = ["example", "mode", "palette", "channel", "source",
                      "grid_w", "grid_h", "kernel_mode", "blend",
                      "levels", "radius"].contains(p.key)

@@ -12,6 +12,7 @@
 #pragma once
 #include "VizFrame.h"
 #include "BeatDetector.h"
+#include "Features.h"
 #include "../platform/fft.h"
 #include <atomic>
 #include <chrono>
@@ -43,6 +44,11 @@ public:
     // Beat-detector tuning (sensitivity etc.) lives on the detector itself.
     BeatDetector& beatDetector() { return _beat; }
 
+    // The audio's sample rate (features need it for band edges). Default
+    // 48 kHz; the classic spectrum and beat don't depend on it.
+    void setSampleRate(double hz) { _features.setSampleRate(hz); }
+    AudioFeatures& features() { return _features; }
+
     // Bass-band RMS amplitude of the last analyzed frame (linear, what the
     // detector saw) — diagnostic/calibration aid.
     float lastBassRms() const { return _lastBassRms; }
@@ -71,6 +77,8 @@ private:
     std::vector<float> _window;                  // normalized Hann window (kFFT)
 
     BeatDetector _beat;
+    AudioFeatures _features;
+    std::vector<float> _fresh[kMaxChannels];     // samples since the previous analyze(), mixed
     float _lastBassRms = 0.f;
     std::chrono::steady_clock::time_point _lastAnalyze{};
     double _elapsed = 0.0;                       // seconds since first analyze()

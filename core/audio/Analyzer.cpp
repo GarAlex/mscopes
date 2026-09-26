@@ -46,18 +46,38 @@ void Analyzer::analyze(VizFrame& out, double dtOverride)
     for (int c = 0; c < kMaxChannels; ++c)
         for (int i = 0; i < kFFT; ++i) chan[c][i] = 0.f;
     int channels = 1;
-    for (auto& sl : _slots) {
+    // Samples that arrived since the previous analyze() (the features want
+    // every one): as many as the busiest live slot delivered, each slot's
+    // newest ones summed, newest-aligned like the window above.
+    uint64_t freshCount = 0;
+    uint64_t liveW[kSlots] = {};
+    for (int si = 0; si < kSlots; ++si) {
+        Slot& sl = _slots[si];
         uint64_t w = sl.written.load(std::memory_order_acquire);
         if (w == 0) continue;
         bool live = w != sl.seen;
+        uint64_t fresh = w - sl.seen;
         sl.seen = w;
         if (!live) continue;                       // source stopped: leave it out
+        liveW[si] = w;
+        freshCount = std::max(freshCount, fresh);
         channels = std::max(channels, sl.channels.load(std::memory_order_relaxed));
         uint64_t start = w >= (uint64_t)kFFT ? w - (uint64_t)kFFT : 0;
         for (int c = 0; c < kMaxChannels; ++c)
             for (int i = 0; i < kFFT; ++i) {
                 uint64_t idx = start + (uint64_t)i;
                 if (idx < w) chan[c][i] += sl.ring[c][idx % kRing];
+            }
+    }
+    const int nFresh = (int)std::min<uint64_t>(freshCount, (uint64_t)(kRing - kFFT));
+    for (int c = 0; c < kMaxChannels; ++c) _fresh[c].assign((size_t)nFresh, 0.f);
+    for (int si = 0; si < kSlots; ++si) {
+        const uint64_t w = liveW[si];
+        if (w == 0) continue;
+        for (int c = 0; c < kMaxChannels; ++c)
+            for (int i = 0; i < nFresh; ++i) {
+                uint64_t back = (uint64_t)(nFresh - i);
+                if (back <= w) _fresh[c][(size_t)i] += _slots[si].ring[c][(w - back) % kRing];
             }
     }
 
@@ -129,6 +149,11 @@ void Analyzer::analyze(VizFrame& out, double dtOverride)
     out.beat      = _beat.process(bassRms, dt);
     out.bpm       = _beat.bpm();
     out.beatPhase = _beat.beatPhase();
+
+    // Features (Features.h), beside the classic analysis above.
+    const float* fresh[kMaxChannels];
+    for (int c = 0; c < kMaxChannels; ++c) fresh[c] = _fresh[c].data();
+    _features.process(fresh, kMaxChannels, nFresh, dt, out);
 }
 
 } // namespace viz

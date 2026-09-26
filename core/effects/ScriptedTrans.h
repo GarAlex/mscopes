@@ -11,6 +11,7 @@
 #pragma once
 #include "Effect.h"
 #include "EelVM.h"
+#include "AudioVars.h"
 #include <memory>
 #include <string>
 
@@ -38,6 +39,7 @@ protected:
 
     std::unique_ptr<eel::VM> _vm;
     eel::Program _pInit, _pFrame, _pBeat, _pPoint;
+    AudioVars _audioVars;              // kick, snare, hat, … (AudioVars.h)
     std::string _sInit, _sFrame, _sBeat, _sPoint;
     bool _scriptsDirty = true;
     bool _inited = false;

@@ -37,7 +37,7 @@ void FeedbackWarp::render(Framebuffer& cur, const Framebuffer& prev,
 
     float zoom = zoomBase + zoomBass * a.bass;
     float ang  = spin + spinTreble * a.treble;
-    if (a.beat) zoom += beatKick;              // kick on beat
+    if (onBeat(a)) zoom += beatKick;              // kick on beat
     // Inverse transform (we fill cur(x,y) by sampling prev at the source).
     float inv = 1.0f / zoom;
     float ca = std::cos(-ang) * inv, sa = std::sin(-ang) * inv;
@@ -75,7 +75,10 @@ void ScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
 
     // Waveform oscilloscope. Smooth: an anti-aliased additive trace through
     // the interpolated waveform, a segment every two pixels. Otherwise one
-    // bright additive dot per column, hue cycling, as it always was.
+    // bright additive dot per column, hue cycling, as it always was. With
+    // the analyzer's features the trace is the triggered waveform, so a
+    // steady tone stands still instead of sliding.
+    const float* wave = a.hasFeatures ? a.scope[0] : a.waveform[0];
     if (drawQuality().smooth) {
         const float hw = 0.5f * std::max(0.25f, drawQuality().widthScale);
         const int N = std::max(2, W / 2);
@@ -84,7 +87,7 @@ void ScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
             float t = (float)i / (N - 1);
             float pos = t * (kWaveformSamples - 1);
             int i0 = (int)pos, i1 = std::min(i0 + 1, kWaveformSamples - 1);
-            float s = a.waveform[0][i0] + (a.waveform[0][i1] - a.waveform[0][i0]) * (pos - (float)i0);
+            float s = wave[i0] + (wave[i1] - wave[i0]) * (pos - (float)i0);
             float x = 0.5f + t * (W - 1), y = midY + s * (H * amp);
             if (i > 0) {
                 float r, g, b;
@@ -99,7 +102,7 @@ void ScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     for (int x = 0; x < W && !drawQuality().smooth; ++x) {
         float t = (float)x / (W - 1);
         int wi = std::min((int)(t * kWaveformSamples), kWaveformSamples - 1);
-        float s = a.waveform[0][wi];
+        float s = wave[wi];
         float y = midY + s * (H * amp);
 
         float r, g, b;
@@ -112,13 +115,20 @@ void ScopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         prevY = y;
     }
 
-    // Spectrum glow along the bottom: additive colored bars (short).
+    // Spectrum glow along the bottom: additive colored bars (short). With
+    // features, the log bands (each with its own gain) spread the music
+    // over the whole width; without, linear bins as before.
     const int bars = 96;
     for (int bar = 0; bar < bars; ++bar) {
         float f = (float)bar / bars;
-        int lo = (int)(f * kSpectrumBins), hi = std::min((int)((f + 1.f/bars) * kSpectrumBins), kSpectrumBins);
-        float e = 0; for (int i = lo; i < hi; ++i) e += a.spectrum[0][i];
-        e /= std::max(1, hi - lo);
+        float e;
+        if (a.hasFeatures) {
+            e = a.bandAt((f + 0.5f / bars) * 1.0f) * 0.55f;
+        } else {
+            int lo = (int)(f * kSpectrumBins), hi = std::min((int)((f + 1.f/bars) * kSpectrumBins), kSpectrumBins);
+            e = 0; for (int i = lo; i < hi; ++i) e += a.spectrum[0][i];
+            e /= std::max(1, hi - lo);
+        }
         int bh = (int)(e * H * 0.35f);
         float r, g, b; hsv(0.6f - f * 0.6f, 0.9f, gain * 0.7f, r, g, b);
         int x = (int)(f * W);
@@ -211,7 +221,7 @@ void ColorMapEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
                             const VizFrame& a, const EffectContext& /*ctx*/)
 {
     if (_palettes.empty() || cur.w == 0) return;
-    if (cycleOnBeat > 0.5f && a.beat)
+    if (cycleOnBeat > 0.5f && onBeat(a))
         palette = (float)(((int)palette + 1) % (int)_palettes.size());
     const Palette& pal = _palettes[(size_t)palette % _palettes.size()];
 
@@ -306,10 +316,15 @@ void SpectrumBarsEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     const int perBar = std::max(1, kSpectrumBins / nBars);
     float rgb[3];
     for (int bar = 0; bar < nBars; ++bar) {
-        float sum = 0.f;
-        for (int k = 0; k < perBar; ++k)
-            sum += a.spectrum[0][std::min(kSpectrumBins - 1, bar * perBar + k)];
-        float avg = std::clamp(sum / perBar, 0.f, 1.f);
+        float avg;
+        if (a.hasFeatures) {                     // log bands, each with its own gain
+            avg = std::clamp(a.bandAt(((float)bar + 0.5f) / nBars), 0.f, 1.f);
+        } else {
+            float sum = 0.f;
+            for (int k = 0; k < perBar; ++k)
+                sum += a.spectrum[0][std::min(kSpectrumBins - 1, bar * perBar + k)];
+            avg = std::clamp(sum / perBar, 0.f, 1.f);
+        }
         hsv2rgb((float)bar / nBars + hueShift, saturation, 0.55f + 0.45f * avg, rgb);
 
         int x0 = bar * W / nBars + 1, x1 = (bar + 1) * W / nBars - 1;
@@ -321,7 +336,8 @@ void SpectrumBarsEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
             }
     }
 
-    // waveform trace across the vertical center
+    // waveform trace across the vertical center (triggered when available)
+    const float* wave = a.hasFeatures ? a.scope[0] : a.waveform[0];
     if (waveAmp > 0.f && drawQuality().smooth) {
         const float hw = 0.5f * std::max(0.25f, drawQuality().widthScale);
         const int N = std::max(2, W / 2);
@@ -330,7 +346,7 @@ void SpectrumBarsEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
             float t = (float)i / (N - 1);
             float pos = t * (kWaveformSamples - 1);
             int i0 = (int)pos, i1 = std::min(i0 + 1, kWaveformSamples - 1);
-            float s = a.waveform[0][i0] + (a.waveform[0][i1] - a.waveform[0][i0]) * (pos - (float)i0);
+            float s = wave[i0] + (wave[i1] - wave[i0]) * (pos - (float)i0);
             float x = 0.5f + t * (W - 1), y = std::clamp(H * 0.5f + s * waveAmp * H, 0.f, (float)H);
             if (i > 0)
                 drawSegmentAA(cur, lx, ly, x, y, hw, 0.9f, 0.9f, 0.9f, /*replace*/0, 1.f,
@@ -341,7 +357,7 @@ void SpectrumBarsEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
         int prevY = -1;
         for (int x = 0; x < W; ++x) {
             int i = x * (kWaveformSamples - 1) / std::max(1, W - 1);
-            int y = std::clamp((int)(H * 0.5f + a.waveform[0][i] * waveAmp * H),
+            int y = std::clamp((int)(H * 0.5f + wave[i] * waveAmp * H),
                                0, H - 1);
             int yA = prevY < 0 ? y : prevY, yB = y;
             if (yA > yB) std::swap(yA, yB);

@@ -27,6 +27,7 @@ set(VIZ_SOURCES
   core/preset/JsonPreset.cpp
   core/audio/Analyzer.cpp
   core/audio/BeatDetector.cpp
+  core/audio/Features.cpp
 )
 if(APPLE)
   list(APPEND VIZ_SOURCES core/gpu/metal/GpuFx.mm core/platform/fft.mm)
@@ -52,7 +53,7 @@ enable_testing()
 set(TEST_OUT ${CMAKE_BINARY_DIR}/test-out)
 file(MAKE_DIRECTORY ${TEST_OUT}/effects ${TEST_OUT}/gallery ${TEST_OUT}/avs ${TEST_OUT}/picture ${TEST_OUT}/draw)
 
-foreach(t eel_selftest beat_selftest fft_selftest effects_selftest avs_selftest picture_selftest draw_selftest)
+foreach(t eel_selftest beat_selftest fft_selftest effects_selftest avs_selftest picture_selftest draw_selftest features_selftest)
   add_executable(${t} core/tests/${t}.cpp)
   target_link_libraries(${t} PRIVATE viz)
 endforeach()
@@ -65,3 +66,4 @@ add_test(NAME gallery COMMAND effects_selftest gallery ${TEST_OUT}/gallery)
 add_test(NAME avs     COMMAND avs_selftest ${CMAKE_SOURCE_DIR}/presets/tests ${TEST_OUT}/avs)
 add_test(NAME picture COMMAND picture_selftest ${TEST_OUT}/picture)
 add_test(NAME draw    COMMAND draw_selftest ${TEST_OUT}/draw)
+add_test(NAME features COMMAND features_selftest)

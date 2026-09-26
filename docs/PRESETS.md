@@ -50,6 +50,23 @@ and the common APEs. Deliberately unsupported: Text, Picture, SVP/Video
 Off…). A preset whose only components are those loads empty; everything
 else renders. Over the full community archive that is 10 files in 13,440.
 
+## Extra script variables
+
+Scripts in Superscope, Dynamic Movement, the scripted transforms and the
+pixel shader can read these, besides AVS's own and `bass`, `mid`, `treb`,
+`bpm`, `beatphase`:
+
+| Variable | Value |
+|---|---|
+| `kick`, `snare`, `hat` | 1 at a hit of that drum, decaying toward 0 |
+| `onset` | how percussive the sound is right now, 0..1 |
+| `level` | overall loudness, 0..1, with automatic gain |
+| `bass_att`, `mid_att`, `treb_att` | slow averages of lows, mids and highs, 0..1 |
+
+A preset that assigns one of these names in its own scripts keeps it as its
+own variable, so older presets that happen to use the same names behave as
+they always did.
+
 ## "It's just black"
 
 Some presets are **modifiers**: they contain no scope or renderer, only

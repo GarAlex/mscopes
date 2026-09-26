@@ -8,6 +8,8 @@
 //   --hdr         HDR highlights: the light that clips at white each frame is
 //                 kept aside and shown white-hot (implies the picture pass)
 //   --width-scale x   render pixels per point for line widths (default 1)
+//   --no-features  drop the analyzer's features (log bands, drum hits, the
+//                 triggered waveform…) as a source without them would: A/B
 //   --last        write only the final frame (a still, without filling the disk:
 //                 a 1280x720 sequence is ~1.5 MB per frame)
 //
@@ -89,6 +91,7 @@ int main(int argc, const char** argv)
     bool usePicture = false;
     int DW = 0, DH = 0;
     bool lastOnly = false;
+    bool noFeatures = false;
     std::string lookName, cubePath;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -105,6 +108,7 @@ int main(int argc, const char** argv)
         else if (a == "--out") out = next();
         else if (a == "--last") lastOnly = true;
         else if (a == "--smooth") drawQuality().smooth = true;
+        else if (a == "--no-features") noFeatures = true;
         else if (a == "--hdr") { drawQuality().hdr = true; pic.hdr = true; usePicture = true; }
         else if (a == "--width-scale") drawQuality().widthScale = (float)atof(next());
         else if (a == "--list-looks") { for (const auto& n : lookNames()) printf("%s\n", n.c_str()); return 0; }
@@ -165,6 +169,7 @@ int main(int argc, const char** argv)
     Analyzer analyzer;
     bool haveAudio = !audio.empty();
     if (haveAudio && !readWav(audio, wav)) { fprintf(stderr, "vizrender: cannot read %s\n", audio.c_str()); return 2; }
+    if (haveAudio) analyzer.setSampleRate(wav.rate);
     if (haveAudio) {
         long total = (long)wav.samples.size() / wav.channels;
         frames = std::min<long>(frames, (total * fps) / wav.rate);
@@ -186,6 +191,7 @@ int main(int argc, const char** argv)
             analyzer.push(wav.samples.data() + cursor * wav.channels, (int)avail, wav.channels);
             cursor += avail;
             analyzer.analyze(f, 1.0 / fps);
+            if (noFeatures) f.hasFeatures = false;     // as a source without them (A/B)
         } else {
             test::synthAudio(f, i);
         }

@@ -65,6 +65,21 @@ public:
     }
 
     bool enabled = true;
+
+    // Which hit sets off an effect's on-beat reaction (the modern effects
+    // offer it as the "trigger" parameter): 0 the beat (the classic
+    // detector), 1 kick, 2 snare, 3 hi-hat. Sources without drum detection
+    // (the Music plugin) use the beat for all of them.
+    float trigger = 0.f;
+    bool onBeat(const VizFrame& a) const {
+        if (!a.hasFeatures) return a.beat;
+        switch ((int)trigger) {
+            case 1:  return a.kickHit;
+            case 2:  return a.snareHit;
+            case 3:  return a.hatHit;
+            default: return a.beat;
+        }
+    }
 };
 
 } // namespace viz

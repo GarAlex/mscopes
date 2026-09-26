@@ -103,6 +103,7 @@ const std::map<std::string, EffectFactory>& effectRegistry()
         {"radial_blur",     make<RadialBlurEffect>()},
         {"neon_edges",      make<NeonEdgesEffect>()},
         {"duotone",         make<DuotoneEffect>()},
+        {"vectorscope",     make<VectorscopeEffect>()},
     };
     return reg;
 }
@@ -125,7 +126,7 @@ bool isModernEffectKey(const std::string& key)
         "bloom", "kaleidoscope", "rgb_split", "pixel_shader",
         "tone_map", "vignette", "trails", "particles", "spectrum_bars",
         "shockwave", "glitch", "streaks", "crt", "shimmer",
-        "lens", "radial_blur", "neon_edges", "duotone",
+        "lens", "radial_blur", "neon_edges", "duotone", "vectorscope",
     };
     return modern.count(key) > 0;
 }
@@ -150,7 +151,7 @@ const std::vector<Preset>& builtinPresets()
         // Slow outward drift, heavy blur, ocean palette — ambient.
         { "Deep Ocean", {
             {"feedback_warp", {{"zoom", 0.985f}, {"zoom_bass", 0.02f}, {"spin", -0.008f},
-                               {"spin_treble", 0.0f}, {"beat_kick", 0.005f}, {"decay", 0.98f}}},
+                               {"spin_treble", 0.0f}, {"beat_kick", 0.005f}, {"trigger", 1}, {"decay", 0.98f}}},
             {"blur",          {{"radius", 2}, {"mix", 1}}},
             {"scope",         {{"amp", 0.24f}, {"gain", 1.0f}}},
             {"color_map",     {{"palette", 1}, {"cycle_on_beat", 0}}},
@@ -158,7 +159,7 @@ const std::vector<Preset>& builtinPresets()
         // Warp-speed stars streaking through a fast-fading feedback field.
         { "Starflight", {
             {"feedback_warp", {{"zoom", 1.030f}, {"zoom_bass", 0.05f}, {"spin", 0.0f},
-                               {"spin_treble", 0.0f}, {"beat_kick", 0.02f}, {"decay", 0.90f}}},
+                               {"spin_treble", 0.0f}, {"beat_kick", 0.02f}, {"trigger", 1}, {"decay", 0.90f}}},
             {"starfield",     {{"speed", 0.4f}, {"speed_bass", 1.5f}, {"brightness", 1.0f}}},
             {"blur",          {{"radius", 1}, {"mix", 0.55f}}},
         }},
@@ -173,15 +174,15 @@ const std::vector<Preset>& builtinPresets()
         { "Neon Cathedral", {
             {"feedback_warp", {{"zoom", 1.022f}, {"zoom_bass", 0.06f}, {"spin", 0.018f}, {"decay", 0.94f}}},
             {"scope",         {{"amp", 0.32f}, {"gain", 1.0f}}},
-            {"kaleidoscope",  {{"segments", 6}, {"spin", 0.10f}, {"spin_beat", 0.5f}}},
+            {"kaleidoscope",  {{"segments", 6}, {"spin", 0.10f}, {"spin_beat", 0.5f}, {"trigger", 1}}},
             {"bloom",         {{"threshold", 0.5f}, {"radius", 18}, {"intensity", 1.3f}, {"bass_boost", 0.8f}}},
-            {"rgb_split",     {{"amount", 1.5f}, {"beat_pump", 8}}},
+            {"rgb_split",     {{"amount", 1.5f}, {"beat_pump", 8}, {"trigger", 2}}},
         }, /*modern=*/true},
         // Particle fountain with phosphor trails, graded like film.
         { "Ember Field", {
             {"clear_screen",  {{"r", 0}, {"g", 0}, {"b", 0}}},
-            {"trails",        {{"persistence", 0.82f}, {"mode", 1}, {"beat_flash", 0.3f}}},
-            {"particles",     {{"emit_rate", 110}, {"beat_burst", 200}, {"speed", 0.65f},
+            {"trails",        {{"persistence", 0.82f}, {"mode", 1}, {"beat_flash", 0.3f}, {"trigger", 2}}},
+            {"particles",     {{"emit_rate", 110}, {"beat_burst", 200}, {"trigger", 1}, {"speed", 0.65f},
                                {"gravity", -0.25f}, {"drag", 0.45f}, {"size", 3},
                                {"hue", 0.07f}, {"hue_spread", 0.12f}, {"lifetime", 2.2f}}},
             {"bloom",         {{"threshold", 0.5f}, {"radius", 12}, {"intensity", 0.9f}, {"bass_boost", 0.8f}}},
@@ -194,15 +195,15 @@ const std::vector<Preset>& builtinPresets()
             {"feedback_warp", {{"zoom", 1.035f}, {"zoom_bass", 0.08f}, {"spin", 0.012f}, {"decay", 0.87f}}},
             {"starfield",     {{"speed", 0.55f}, {"speed_bass", 2.0f}, {"brightness", 1.2f}}},
             {"scope",         {{"amp", 0.26f}, {"gain", 1.0f}}},
-            {"radial_blur",   {{"amount", 0.10f}, {"beat_pump", 0.4f}}},
-            {"shockwave",     {{"speed", 1.8f}, {"strength", 0.06f}}},
+            {"radial_blur",   {{"amount", 0.10f}, {"beat_pump", 0.4f}, {"trigger", 2}}},
+            {"shockwave",     {{"speed", 1.8f}, {"strength", 0.06f}, {"trigger", 1}}},
             {"vignette",      {{"inner", 0.5f}, {"outer", 1.2f}, {"strength", 0.7f}}},
         }, /*modern=*/true},
         // Molten glass: kaleidoscope through a bass-breathing lens + shimmer.
         { "Liquid Glass", {
             {"feedback_warp", {{"zoom", 1.018f}, {"spin", -0.015f}, {"decay", 0.90f}}},
             {"scope",         {{"amp", 0.30f}, {"gain", 1.1f}}},
-            {"kaleidoscope",  {{"segments", 8}, {"spin", -0.08f}, {"spin_beat", 0.3f}}},
+            {"kaleidoscope",  {{"segments", 8}, {"spin", -0.08f}, {"spin_beat", 0.3f}, {"trigger", 1}}},
             {"lens",          {{"strength", 0.45f}, {"bass_boost", 0.6f}}},
             {"shimmer",       {{"amount", 3}, {"scale", 12}, {"bass_boost", 2}}},
             {"bloom",         {{"threshold", 0.62f}, {"radius", 14}, {"intensity", 0.85f}}},
@@ -215,7 +216,7 @@ const std::vector<Preset>& builtinPresets()
             {"ring",          {}},
             {"neon_edges",    {{"glow", 2.2f}, {"keep_source", 0.0f}}},
             {"trails",        {{"persistence", 0.72f}, {"mode", 1}}},
-            {"glitch",        {{"intensity", 0.55f}, {"decay", 5}}},
+            {"glitch",        {{"intensity", 0.55f}, {"decay", 5}, {"trigger", 2}}},
             {"vignette",      {{"inner", 0.55f}, {"outer", 1.25f}, {"strength", 0.6f}}},
         }, /*modern=*/true},
         // Film noir in two colors: indigo shadows, coral highlights, grain
@@ -223,13 +224,22 @@ const std::vector<Preset>& builtinPresets()
         { "Duotone Noir", {
             {"clear_screen",  {{"r", 0}, {"g", 0}, {"b", 0}}},
             {"trails",        {{"persistence", 0.8f}, {"mode", 0}}},
-            {"particles",     {{"emit_rate", 90}, {"beat_burst", 150}, {"speed", 0.4f},
+            {"particles",     {{"emit_rate", 90}, {"beat_burst", 150}, {"trigger", 1}, {"speed", 0.4f},
                                {"gravity", 0.05f}, {"size", 5}, {"hue", 0.08f}, {"lifetime", 3}}},
             {"scope",         {{"amp", 0.3f}, {"gain", 1.0f}}},
             {"streaks",       {{"threshold", 0.55f}, {"length", 50}, {"intensity", 1.1f}}},
             {"duotone",       {{"mix", 0.9f}}},
             {"grain",         {}},
             {"vignette",      {{"inner", 0.45f}, {"outer", 1.15f}, {"strength", 0.75f}}},
+        }, /*modern=*/true},
+        // An analog scope's beam: every sample drawn as one continuous trace,
+        // the signal against itself a moment earlier, fading like phosphor.
+        { "Phosphor", {
+            {"clear_screen",  {{"r", 0}, {"g", 0}, {"b", 0}}},
+            {"trails",        {{"persistence", 0.62f}, {"mode", 1}}},
+            {"vectorscope",   {{"mode", 1}, {"delay", 96}, {"size", 0.85f}, {"gain", 1.4f}, {"hue", 0.36f}}},
+            {"bloom",         {{"threshold", 0.4f}, {"radius", 14}, {"intensity", 1.3f}, {"bass_boost", 0.4f}}},
+            {"vignette",      {{"inner", 0.5f}, {"outer", 1.25f}, {"strength", 0.6f}}},
         }, /*modern=*/true},
         // The pixel shader's aurora over a slow tunnel, graded cold.
         { "Aurora", {

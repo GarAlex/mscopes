@@ -22,7 +22,7 @@ void KaleidoscopeEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
 {
     double dt = _lastTime < 0 ? 1.0 / 60.0 : std::max(0.0, ctx.time - _lastTime);
     _lastTime = ctx.time;
-    if (a.beat) _kick += spinBeat;
+    if (onBeat(a)) _kick += spinBeat;
     _kick *= std::pow(0.05, dt);               // fast decay
     _angle += (spin + _kick) * dt;
     gpu::kaleidoscope(cur, std::clamp((int)segments, 2, 16), (float)_angle, zoom);
@@ -33,7 +33,7 @@ void RgbSplitEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
 {
     double dt = _lastTime < 0 ? 1.0 / 60.0 : std::max(0.0, ctx.time - _lastTime);
     _lastTime = ctx.time;
-    if (a.beat) _pump = beatPump;
+    if (onBeat(a)) _pump = beatPump;
     _pump *= std::pow(0.02, dt);
     float amt = amount + (float)_pump;
     if (amt < 0.05f) return;
@@ -46,7 +46,7 @@ void ShockwaveEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     double dt = _lastTime < 0 ? 1.0 / 60.0 : std::max(0.0, ctx.time - _lastTime);
     _lastTime = ctx.time;
 
-    if (a.beat && a.bass >= bassGate) {
+    if (onBeat(a) && ((int)trigger != 0 || a.bass >= bassGate)) {   // the gate is for the plain beat
         for (auto& r : _radii)                   // claim a free (or oldest) slot
             if (r < 0) { r = 0.01f; goto spawned; }
         _radii[0] = 0.01f;
@@ -68,7 +68,7 @@ void GlitchEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     double dt = _lastTime < 0 ? 1.0 / 60.0 : std::max(0.0, ctx.time - _lastTime);
     _lastTime = ctx.time;
 
-    if (a.beat) _energy = 1.0;
+    if (onBeat(a)) _energy = 1.0;
     _energy *= std::exp(-decay * dt);
     float amt = std::clamp((float)_energy * intensity + constant, 0.f, 1.f);
     if (amt < 0.02f) return;
@@ -96,7 +96,7 @@ void RadialBlurEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
 {
     double dt = _lastTime < 0 ? 1.0 / 60.0 : std::max(0.0, ctx.time - _lastTime);
     _lastTime = ctx.time;
-    if (a.beat) _pump = beatPump;
+    if (onBeat(a)) _pump = beatPump;
     _pump *= std::pow(0.03, dt);
     float amt = std::clamp(amount + (float)_pump, 0.f, 1.f);
     if (amt < 0.02f) return;
