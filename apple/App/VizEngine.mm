@@ -78,6 +78,8 @@ static void wvOnSIGUSR2(int)
 - (void)presentFrame;
 @end
 
+static void wvLog(const char* fmt, ...);   // engine.log (defined below)
+
 @implementation WVRenderView
 - (instancetype)initWithFrame:(NSRect)f
 {
@@ -187,7 +189,13 @@ static void wvOnSIGUSR2(int)
         NSScreen* screen = self.window.screen;
         const BOOL wantEDR = s.hdr && screen &&
             (forceEDR || screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.01);
-        if (wantEDR != _edr) [self setExtendedRange:wantEDR];
+        if (wantEDR != _edr) {
+            [self setExtendedRange:wantEDR];
+            wvLog("display: %s (screen headroom now %.2f, potential %.2f)",
+                  wantEDR ? "extended range on" : "extended range off",
+                  screen ? screen.maximumExtendedDynamicRangeColorComponentValue : 1.0,
+                  screen ? screen.maximumPotentialExtendedDynamicRangeColorComponentValue : 1.0);
+        }
         s.linearOutput = _edr;
         s.headroom = _edr ? (float)std::max<CGFloat>(1.0, screen.maximumExtendedDynamicRangeColorComponentValue) : 1.f;
         viz::gpu::present(*fb, (__bridge void*)self.layer, s);
