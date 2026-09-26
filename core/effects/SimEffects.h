@@ -95,6 +95,7 @@ public:
     float hueSpread = 0.35f;
     float hueSpeed  = 0.02f;
     float orbit     = 0.15f;    // emitter orbit speed (turns / s)
+    float layout    = 0.f;      // 0: emitters orbit the centre; 1: they wander the whole frame
 
     std::vector<Param> params() override {
         return {{"scale", 0.1f, 0.5f, &scale},
@@ -111,7 +112,8 @@ public:
                 {"hue", 0.f, 1.f, &hue},
                 {"hue_spread", 0.f, 1.f, &hueSpread},
                 {"hue_speed", 0.f, 0.5f, &hueSpeed},
-                {"orbit", 0.f, 1.f, &orbit}};
+                {"orbit", 0.f, 1.f, &orbit},
+                {"layout", 0.f, 1.f, &layout}};
     }
 
     // The splats for one frame (shared by the GPU and CPU versions).
@@ -146,6 +148,7 @@ public:
     float hue      = 0.08f;
     float mixAmt   = 1.f;
     float emboss   = 0.8f;
+    float pulse    = 1.f;       // how hard the music hits the picture
 
     std::vector<Param> params() override {
         return {{"scale", 0.2f, 1.f, &scale},
@@ -157,7 +160,8 @@ public:
                 {"trigger", 0.f, 3.f, &trigger},
                 {"hue", 0.f, 1.f, &hue},
                 {"mix", 0.f, 1.f, &mixAmt},
-                {"emboss", 0.f, 2.f, &emboss}};
+                {"emboss", 0.f, 2.f, &emboss},
+                {"pulse", 0.f, 2.f, &pulse}};
     }
 
 private:
@@ -165,6 +169,7 @@ private:
     bool _started = false;
     uint32_t _rng = 0x2545F491u;
     float _feedNow = 0.f, _killNow = 0.f;
+    float _hit = 0.f;                               // envelope of the last hit
     float rnd();
     // CPU version: a coarser grid.
     int _gw = 0, _gh = 0;

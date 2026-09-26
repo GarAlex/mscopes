@@ -192,15 +192,33 @@ std::vector<gpu::FluidSplat> FluidEffect::splatsFor(const VizFrame& a, const Eff
     // strength of its band (lows, mids, highs in turn) and trailing dye in
     // its own hue. Forces act over the frame (x dt); the fluid keeps a
     // share of its velocity per second, so they settle, not pile up.
+    const bool wander = layout > 0.5f;
     for (int k = 0; k < E; ++k) {
-        const float th = 6.2831853f * ((float)k / (float)E + orbit * (float)_time);
-        const float ox = std::cos(th), oy = std::sin(th);
         const float en = band[k % 3];
         const float push = force * (0.2f + 1.6f * en * en) * 6.f * dt;
         gpu::FluidSplat s;
-        s.x = 0.5f + 0.28f * ox / aspect; s.y = 0.5f + 0.28f * oy;
-        s.vx = -oy * push - ox * push * 0.15f;
-        s.vy = ox * push - oy * push * 0.15f;
+        if (wander) {
+            // Each emitter drifts along its own smooth noise path over the
+            // whole frame and paints along the way it is going: wisps
+            // everywhere instead of one swirl in the middle.
+            auto path = [&](double t, float& px, float& py) {
+                const float tt = (float)t * (0.05f + 0.4f * orbit);
+                px = std::clamp(0.5f + 0.6f * simNoise(k * 7.13f + 0.5f, tt, 3.1f), 0.06f, 0.94f);
+                py = std::clamp(0.5f + 0.55f * simNoise(k * 3.71f + 40.5f, tt, 7.7f), 0.08f, 0.92f);
+            };
+            float x2, y2;
+            path(_time, s.x, s.y);
+            path(_time + 0.25, x2, y2);
+            float dx = (x2 - s.x) * aspect, dy = y2 - s.y;
+            const float l = std::sqrt(dx * dx + dy * dy) + 1e-6f;
+            s.vx = dx / l * push; s.vy = dy / l * push;
+        } else {
+            const float th = 6.2831853f * ((float)k / (float)E + orbit * (float)_time);
+            const float ox = std::cos(th), oy = std::sin(th);
+            s.x = 0.5f + 0.28f * ox / aspect; s.y = 0.5f + 0.28f * oy;
+            s.vx = -oy * push - ox * push * 0.15f;
+            s.vy = ox * push - oy * push * 0.15f;
+        }
         float rgb[3];
         hsvRgb(baseHue + hueSpread * (float)k / (float)E, 0.85f, 1.f, rgb);
         const float amt = dye * (0.15f + 1.5f * en * en) * dt * 4.f;
@@ -388,21 +406,29 @@ void ReactionDiffusionEffect::render(Framebuffer& cur, const Framebuffer& /*prev
     const bool reset = !_started;
     if (reset)
         for (int i = 0; i < 28; ++i) seeds.push_back({rnd(), rnd(), seedSize * (0.5f + rnd())});
-    if (onBeat(a))
-        for (int i = 0; i < 2; ++i) seeds.push_back({0.1f + 0.8f * rnd(), 0.1f + 0.8f * rnd(), seedSize});
+    // A hit plants new growth where it lands and flashes the picture.
+    const bool hit = onBeat(a);
+    if (hit)
+        for (int i = 0; i < 3; ++i) seeds.push_back({0.1f + 0.8f * rnd(), 0.1f + 0.8f * rnd(), seedSize * 1.5f});
+    _hit = hit ? 1.f : _hit * std::exp(-dt / 0.25f);
     _started = true;
 
     gpu::RDParams p;
     p.scale = scale;
     p.feed = std::clamp(_feedNow, 0.005f, 0.1f);
     p.kill = std::clamp(_killNow, 0.03f, 0.075f);
-    p.iterations = std::clamp((int)std::lround(speed * (0.5f + level)), 1, 32);
+    // Growth follows the loudness: near still in quiet passages, surging
+    // when the music does.
+    p.iterations = std::clamp((int)std::lround(speed * (0.3f + 1.4f * level)), 1, 32);
     p.seeds = seeds.data();
     p.nSeeds = (int)seeds.size();
+    // Colour: the bass swells the pattern's brightness, the mids lean its
+    // hue, a hit flashes it and deepens the relief.
     hsvRgb(hue, 0.7f, 0.04f, p.colorA);
-    hsvRgb(hue + 0.06f, 0.6f, 1.f, p.colorB);
+    const float glow = 0.7f + pulse * (0.3f * band[0] + 0.3f * _hit);
+    hsvRgb(hue + 0.06f + 0.06f * pulse * (band[1] - 0.5f), 0.65f, glow, p.colorB);
     p.mix = mixAmt;
-    p.emboss = emboss;
+    p.emboss = emboss * (1.f + 0.8f * pulse * _hit);
     p.reset = reset;
     if (gpu::available() && gpu::reactionDiffusion(_gpu, cur, p)) return;
     renderCpu(cur, p, reset);

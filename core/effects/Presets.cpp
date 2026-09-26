@@ -261,19 +261,26 @@ const std::vector<Preset>& builtinPresets()
             {"tone_map",       {{"exposure", 1.3f}, {"gamma", 1.0f}, {"saturation", 1.2f}}},
             {"vignette",       {{"inner", 0.5f}, {"outer", 1.3f}, {"strength", 0.6f}}},
         }, /*modern=*/true},
-        // Reaction-diffusion coral that grows and branches; the mids and
-        // highs lean the recipe, kicks plant new seeds.
+        // Reaction-diffusion coral that grows and branches. It surges with
+        // the loudness and glows with the bass; each kick plants new growth,
+        // flashes it and sends a shockwave through it, and the bass breathes
+        // a lens over it.
         { "Coral", {
-            {"reaction_diffusion", {{"feed", 0.055f}, {"kill", 0.062f}, {"hue", 0.03f}, {"trigger", 1}}},
+            {"reaction_diffusion", {{"feed", 0.055f}, {"kill", 0.062f}, {"hue", 0.03f}, {"speed", 14},
+                                    {"pulse", 1.2f}, {"trigger", 1}}},
+            {"lens",           {{"strength", 0.06f}, {"bass_boost", 0.5f}}},
+            {"shockwave",      {{"speed", 1.4f}, {"strength", 0.05f}, {"trigger", 1}}},
+            {"bloom",          {{"threshold", 0.6f}, {"radius", 12}, {"intensity", 0.7f}, {"bass_boost", 0.8f}}},
             {"vignette",       {{"inner", 0.5f}, {"outer", 1.3f}, {"strength", 0.5f}}},
         }, /*modern=*/true},
-        // Drifting stars over clouds of coloured gas.
+        // Deep space: faint wisps of gas painted across the whole sky by
+        // wandering emitters, and a slow starfield drifting through them.
         { "Nebula", {
-            {"fluid",          {{"mode", 1}, {"gain", 0.7f}, {"dye_keep", 0.6f}, {"hue", 0.62f},
-                                {"hue_spread", 0.3f}, {"emitters", 4}, {"trigger", 1}}},
-            {"flow_particles", {{"count", 60000}, {"brightness", 0.25f}, {"speed", 0.35f},
-                                {"hue", 0.12f}, {"hue_spread", 0.15f}, {"trigger", 2}}},
-            {"bloom",          {{"threshold", 0.5f}, {"radius", 16}, {"intensity", 0.9f}}},
+            {"fluid",          {{"mode", 1}, {"layout", 1}, {"gain", 0.8f}, {"dye", 0.22f}, {"dye_keep", 0.7f},
+                                {"vorticity", 45}, {"force", 0.6f}, {"radius", 0.1f}, {"emitters", 4},
+                                {"hue", 0.5f}, {"hue_spread", 0.4f}, {"trigger", 1}}},
+            {"starfield",      {{"speed", 0.06f}, {"speed_bass", 0.4f}, {"brightness", 0.8f}}},
+            {"bloom",          {{"threshold", 0.5f}, {"radius", 16}, {"intensity", 0.6f}}},
             {"vignette",       {{"inner", 0.5f}, {"outer", 1.25f}, {"strength", 0.6f}}},
         }, /*modern=*/true},
         // The pixel shader's aurora over a slow tunnel, graded cold.
