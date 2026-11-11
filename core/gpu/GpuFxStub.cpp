@@ -45,6 +45,9 @@ void crt(Framebuffer&, float, float, float, float) {}
 void toneMap(Framebuffer&, float, float, float, Framebuffer*) {}
 void vignette(Framebuffer&, float, float, float) {}
 void trails(Framebuffer&, const Framebuffer&, float, int) {}
+bool clear(Framebuffer&) { return false; }
+bool copy(Framebuffer&, const Framebuffer&) { return false; }
+void releaseScratch() {}
 bool runCustomKernel(Framebuffer&, const std::string&, const float*, int, std::string* err)
 {
     if (err) *err = "no GPU backend on this platform";

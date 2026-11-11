@@ -69,6 +69,11 @@ static FrameQueue& multiDelayBuffer(int i)
     return pool[std::clamp(i, 0, 5)];
 }
 
+void swapDelayBuffers(FrameQueue (&queues)[6])
+{
+    for (int i = 0; i < 6; ++i) std::swap(multiDelayBuffer(i), queues[i]);
+}
+
 void resetDelayBuffers()
 {
     for (int i = 0; i < 6; ++i) {

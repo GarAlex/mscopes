@@ -48,10 +48,10 @@ struct AlbumsSection: View {
                     HStack {
                         Button { model.prevAlbumTrack() } label: {
                             Image(systemName: "backward.end.fill")
-                        }.disabled(model.currentTrackIndex == 0)
+                        }.accessibilityLabel("Previous track").disabled(model.currentTrackIndex == 0)
                         Button { model.nextAlbumTrack() } label: {
                             Image(systemName: "forward.end.fill")
-                        }.disabled(model.currentTrackIndex + 1 >= album.tracks.count)
+                        }.accessibilityLabel("Next track").disabled(model.currentTrackIndex + 1 >= album.tracks.count)
                         Toggle("Auto", isOn: $model.albumAutoAdvance).font(.caption2)
                         Picker("", selection: $model.albumAutoAdvanceInterval) {
                             Text("30s").tag(30.0)

@@ -69,6 +69,16 @@ void lastPresentTimes(double* bindMs, double* drawableWaitMs, double* gpuWaitMs)
 // a framebuffer's memory outside those points must call flush() first.
 void flush();
 void syncToCpu(Framebuffer& fb);              // CPU will write fb: flush
+// Zero fb's pixels on the GPU, queued with the pending work (no wait).
+// Returns false when the GPU can't: the caller clears on the CPU.
+bool clear(Framebuffer& fb);
+// Copy src's pixels into dst (same size) on the GPU, queued with the pending
+// work: the previous-frame snapshot without waiting for the GPU or copying
+// on the CPU. Returns false when the GPU can't: the caller copies itself.
+bool copy(Framebuffer& dst, const Framebuffer& src);
+// Drawing is paused: release the scratch textures (full-frame float, and the
+// glow pyramid). The next GPU effect makes them again.
+void releaseScratch();
 void syncToCpuForRead(const Framebuffer& fb); // CPU will read fb: flush
 void invalidateResident(const void* fbAddr);  // fb is being cleared/destroyed: flush
 
@@ -170,7 +180,7 @@ void distanceModifier(Framebuffer& fb, const float* table, int n, bool blend, bo
 
 // Per-pixel color transforms (the TransColor family + Color Map). `op`
 // selects the formula and `params` its inputs — the table is documented at
-// fx_colorop in GpuFx.mm; `lut` (256 rgb triplets) is for Color Map.
+// fx_colorop in metal/shaders/Classic.msl.inc; `lut` (256 rgb triplets) is for Color Map.
 void colorOp(Framebuffer& fb, int op, const float* params, int nParams,
              const float* lut = nullptr, int lutFloats = 0);
 

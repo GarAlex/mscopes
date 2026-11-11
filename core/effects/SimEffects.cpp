@@ -270,7 +270,7 @@ void FluidEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
     renderCpu(cur, p);
 }
 
-// The same solver as the GPU's (sim_fl_* in GpuFx.mm) on a coarse grid.
+// The same solver as the GPU's (sim_fl_* in core/gpu/metal/shaders/Sim.msl.inc) on a coarse grid.
 void FluidEffect::renderCpu(Framebuffer& cur, const gpu::FluidParams& p)
 {
     const int gw = std::clamp((int)(cur.w * 0.06f), 32, 128);

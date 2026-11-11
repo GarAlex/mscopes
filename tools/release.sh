@@ -4,6 +4,15 @@
 #
 #   tools/release.sh                  # full: build, sign, notarize, staple, dmg
 #   NOTARY_PROFILE=name tools/release.sh
+#   SKIP_TESTS=1 / ALLOW_DIRTY=1 / FORCE=1 tools/release.sh   (see below)
+#
+# Before building it refuses uncommitted changes (ALLOW_DIRTY=1 to override)
+# and runs the self-tests (SKIP_TESTS=1 to skip). Every finished release is
+# kept in build/releases/<version>/: both disk images, the debug symbols for
+# reading crash reports, the commit and the checksum. build/release/ is only
+# the working folder and is cleared on each run. An existing
+# build/releases/<version>/ is never overwritten unless FORCE=1: bump the
+# version in apple/project.yml instead.
 #
 # Prerequisites (one-time, yours to do):
 #   - a "Developer ID Application" certificate in the login keychain
@@ -20,6 +29,27 @@ REPO="$(cd "$HERE/.." && pwd)"
 OUT="$REPO/build/release"
 SIGN_ID="${SIGN_ID:-Developer ID Application: Alexander Garmash (T9Y6669YYQ)}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-mscopes-notary}"
+
+PLANNED=$(sed -n 's/^ *MARKETING_VERSION: *"\(.*\)".*/\1/p' "$REPO/apple/project.yml" | head -1)
+KEEP="$REPO/build/releases/$PLANNED"
+if [[ -e "$KEEP/MScopes-$PLANNED.dmg" && -z "${FORCE:-}" ]]; then
+    echo "error: $PLANNED was already released (build/releases/$PLANNED). Bump MARKETING_VERSION in apple/project.yml, or FORCE=1." >&2
+    exit 1
+fi
+if [[ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" && -z "${ALLOW_DIRTY:-}" ]]; then
+    echo "error: uncommitted changes; a release should be a commit. Commit first (or ALLOW_DIRTY=1)." >&2
+    exit 1
+fi
+if [[ -z "${SKIP_TESTS:-}" ]]; then
+    echo "== 0/5  Self-tests =="
+    mkdir -p "$REPO/build"
+    "$HERE/run-tests.sh" > "$REPO/build/release-tests.log" 2>&1 || {
+        tail -30 "$REPO/build/release-tests.log"
+        echo "error: self-tests failed; nothing built (log: build/release-tests.log)" >&2
+        exit 1
+    }
+    echo "   all passed"
+fi
 
 rm -rf "$OUT"; mkdir -p "$OUT"
 
@@ -72,11 +102,23 @@ fi
 LATEST="$OUT/MScopes.dmg"
 cp "$DMG" "$LATEST"
 
+# Keep this release: disk images, debug symbols, commit, checksum.
+KEEP="$REPO/build/releases/$VERSION"
+mkdir -p "$KEEP"
+cp "$DMG" "$LATEST" "$KEEP/"
+PRODUCTS="$OUT/DerivedData/Build/Products/Release"
+for sym in MScopes.app.dSYM MScopesPlugin.bundle.dSYM; do
+    [[ -d "$PRODUCTS/$sym" ]] && ditto -c -k --keepParent "$PRODUCTS/$sym" "$KEEP/${sym%.dSYM}-$VERSION.dSYM.zip"
+done
+git -C "$REPO" rev-parse HEAD > "$KEEP/COMMIT"
+shasum -a 256 "$DMG" | sed "s|$OUT/||" > "$KEEP/SHA256"
+
 echo "== 5/5  Gatekeeper check =="
 spctl --assess --type execute --verbose=2 "$APP" 2>&1 | sed 's/^/   /' || true
 echo
 echo "   $DMG"
 echo "   $LATEST   (upload both; the site links releases/latest/download/MScopes.dmg)"
+echo "   kept in build/releases/$VERSION/ with debug symbols, commit and checksum; add NOTES.md there"
 if [[ $notarized -eq 0 ]]; then
     cat <<MSG
    Not notarized yet. After storing credentials, run:

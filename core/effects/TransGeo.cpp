@@ -229,30 +229,28 @@ void GrainEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
 
     const int n = W * H;
     float* p = cur.px.data();
-    const float* q = _depth.data();
-    for (int i = 0; i < n; ++i, p += 4, q += 2) {
+    const float* depth = _depth.data();   // empty (null) unless the grain is static
+    // Branch-free per pixel apart from the black test (black pixels must not
+    // draw random numbers, or the sequence changes): which pixels are
+    // grained is random, so a branch on it mispredicts half the time.
+    // replace: g; additive: min(1, p + g); 50/50: (p + g) / 2.
+    const float wOld = bm == 1 || bm == 2 ? 1.f : 0.f;
+    const float scale = bm == 2 ? 0.5f : 1.f;
+    const bool clampSum = bm == 1;
+    uint32_t rng = _rng;
+    for (int i = 0; i < n; ++i, p += 4) {
         if (p[0] <= 0.f && p[1] <= 0.f && p[2] <= 0.f) continue;   // skip black
         float noise, thresh;
-        if (isStatic) { noise = q[0]; thresh = q[1]; }
-        else          { thresh = xrand(_rng); noise = xrand(_rng); }
-        float cr = 0.f, cg = 0.f, cb = 0.f;
-        if (thresh < amt) {
-            cr = std::min(1.f, p[0] * noise);
-            cg = std::min(1.f, p[1] * noise);
-            cb = std::min(1.f, p[2] * noise);
-        }
-        if (bm == 1) {              // additive
-            p[0] = std::min(1.f, p[0] + cr);
-            p[1] = std::min(1.f, p[1] + cg);
-            p[2] = std::min(1.f, p[2] + cb);
-        } else if (bm == 2) {       // 50/50
-            p[0] = (p[0] + cr) * 0.5f;
-            p[1] = (p[1] + cg) * 0.5f;
-            p[2] = (p[2] + cb) * 0.5f;
-        } else {                    // replace
-            p[0] = cr; p[1] = cg; p[2] = cb;
+        if (isStatic) { noise = depth[2 * i]; thresh = depth[2 * i + 1]; }
+        else          { thresh = xrand(rng); noise = xrand(rng); }
+        const float keep = thresh < amt ? 1.f : 0.f;
+        for (int c = 0; c < 3; ++c) {
+            const float g = std::min(1.f, p[c] * noise) * keep;
+            const float v = (p[c] * wOld + g) * scale;
+            p[c] = clampSum ? std::min(1.f, v) : v;
         }
     }
+    _rng = rng;
 }
 
 // ---------------------------------------------------------------------------

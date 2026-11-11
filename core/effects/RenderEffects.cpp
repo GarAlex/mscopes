@@ -552,16 +552,17 @@ void DotPlaneEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
 
     // Scroll the plane: each row inherits the previous one; the edge row is
     // refreshed from the spectrum (max of 3 adjacent bins, byte scale).
+    // `line` is the row read from; the row after it is written. On the last
+    // pass that is row 0, refreshed from the audio (there is no row -1, so
+    // only form pointers into the arrays for rows that exist).
     int line = (kGrid - 2) * kGrid;
     for (int yPos = 0; yPos < kGrid; ++yPos, line -= kGrid) {
-        float* curH  = &_height[line];
-        float* nextH = &_height[line + kGrid];
-        float* curD  = &_delta[line];
-        float* nextD = &_delta[line + kGrid];
-        auto*  prevC = &_color[line];
-        auto*  nextC = &_color[line + kGrid];
+        const int next = line + kGrid;
+        float* nextH = &_height[next];
+        float* nextD = &_delta[next];
+        auto*  nextC = &_color[next];
         if (yPos == kGrid - 1) {
-            curH = tmpLine;   // old row 0, saved before it was overwritten
+            const float* curH = tmpLine;   // old row 0, saved before it was overwritten
             for (int x = 0; x < kGrid; ++x) {
                 float audio = std::max({a.spectrum[0][x * 3],
                                         a.spectrum[0][x * 3 + 1],
@@ -572,6 +573,9 @@ void DotPlaneEffect::render(Framebuffer& cur, const Framebuffer& /*prev*/,
                 nextD[x] = (nextH[x] - curH[x]) / 90.0f;
             }
         } else {
+            const float* curH = &_height[line];
+            const float* curD = &_delta[line];
+            const auto*  prevC = &_color[line];
             for (int x = 0; x < kGrid; ++x) {
                 nextH[x] = curH[x] + curD[x];
                 if (nextH[x] < 0.0f) nextH[x] = 0.0f;

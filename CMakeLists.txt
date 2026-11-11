@@ -18,6 +18,14 @@ if(APPLE)
   set(CMAKE_OBJCXX_STANDARD 17)
 endif()
 
+# AddressSanitizer + UndefinedBehaviorSanitizer for the engine and the tests
+# (CI runs one job with this; locally: cmake -B build/asan -DMSCOPES_SANITIZE=ON).
+option(MSCOPES_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(MSCOPES_SANITIZE)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
 file(GLOB VIZ_EFFECT_SOURCES CONFIGURE_DEPENDS core/effects/*.cpp)
 set(VIZ_SOURCES
   ${VIZ_EFFECT_SOURCES}
@@ -30,7 +38,8 @@ set(VIZ_SOURCES
   core/audio/Features.cpp
 )
 if(APPLE)
-  list(APPEND VIZ_SOURCES core/gpu/metal/GpuFx.mm core/platform/fft.mm)
+  file(GLOB VIZ_METAL_SOURCES CONFIGURE_DEPENDS core/gpu/metal/*.mm)
+  list(APPEND VIZ_SOURCES ${VIZ_METAL_SOURCES} core/platform/fft.mm)
 else()
   list(APPEND VIZ_SOURCES core/gpu/GpuFxStub.cpp core/platform/fft.cpp)
 endif()
@@ -51,9 +60,9 @@ target_link_libraries(vizrender PRIVATE viz)
 # --- self-tests ------------------------------------------------------------
 enable_testing()
 set(TEST_OUT ${CMAKE_BINARY_DIR}/test-out)
-file(MAKE_DIRECTORY ${TEST_OUT}/effects ${TEST_OUT}/gallery ${TEST_OUT}/avs ${TEST_OUT}/picture ${TEST_OUT}/draw)
+file(MAKE_DIRECTORY ${TEST_OUT}/effects ${TEST_OUT}/gallery ${TEST_OUT}/avs ${TEST_OUT}/picture ${TEST_OUT}/draw ${TEST_OUT}/golden ${TEST_OUT}/golden-cpu)
 
-foreach(t eel_selftest beat_selftest fft_selftest effects_selftest avs_selftest picture_selftest draw_selftest features_selftest)
+foreach(t eel_selftest beat_selftest fft_selftest effects_selftest avs_selftest picture_selftest draw_selftest features_selftest golden_selftest host_selftest parse_selftest)
   add_executable(${t} core/tests/${t}.cpp)
   target_link_libraries(${t} PRIVATE viz)
 endforeach()
@@ -67,6 +76,22 @@ add_test(NAME avs     COMMAND avs_selftest ${CMAKE_SOURCE_DIR}/presets/tests ${T
 add_test(NAME picture COMMAND picture_selftest ${TEST_OUT}/picture)
 add_test(NAME draw    COMMAND draw_selftest ${TEST_OUT}/draw)
 add_test(NAME features COMMAND features_selftest)
+add_test(NAME host COMMAND host_selftest)
+add_test(NAME parse COMMAND parse_selftest ${CMAKE_SOURCE_DIR}/presets/tests)
 # The same with the GPU off: the simulations' CPU versions, as on Linux.
 add_test(NAME features-cpu COMMAND features_selftest)
 set_tests_properties(features-cpu PROPERTIES ENVIRONMENT "MSCOPES_NO_GPU=1")
+# What presets look like, against stored references (core/tests/golden/):
+# with the GPU backend where there is one, and on the CPU paths everywhere.
+# Rewrite the references after an intended change:
+#   build/cmake/golden_selftest presets/tests core/tests/golden build/golden --update
+set(GOLDEN_ARGS ${CMAKE_SOURCE_DIR}/presets/tests ${CMAKE_SOURCE_DIR}/core/tests/golden)
+# Exact (byte-identical) references are kept per toolchain, for Release builds.
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT MSCOPES_SANITIZE)
+  target_compile_definitions(golden_selftest PRIVATE MSCOPES_GOLDEN_EXACT=1)
+endif()
+add_test(NAME golden-cpu COMMAND golden_selftest ${GOLDEN_ARGS} ${TEST_OUT}/golden-cpu)
+set_tests_properties(golden-cpu PROPERTIES ENVIRONMENT "MSCOPES_NO_GPU=1")
+if(APPLE)
+  add_test(NAME golden COMMAND golden_selftest ${GOLDEN_ARGS} ${TEST_OUT}/golden)
+endif()

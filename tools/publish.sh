@@ -12,6 +12,10 @@
 #   tools/publish.sh                 # snapshot HEAD → branch public → push github main
 #   tools/publish.sh --dry-run       # build the snapshot, list it, push nothing
 #   tools/publish.sh -m "message"    # custom commit message for the snapshot
+#   SKIP_TESTS=1 tools/publish.sh    # don't run the self-tests first
+#
+# Before publishing, the self-tests run against HEAD's code (tools/run-tests.sh,
+# including the golden references); a failure stops the publish.
 #
 #   REMOTE=github BRANCH=main        # environment overrides
 #
@@ -36,6 +40,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO"
+if [[ $dry -eq 0 && -z "${SKIP_TESTS:-}" ]]; then
+    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+        echo "error: uncommitted changes; the tests would not be testing what gets published. Commit or stash first (or SKIP_TESTS=1)." >&2
+        exit 1
+    fi
+    echo "== self-tests before publishing (SKIP_TESTS=1 to skip) =="
+    "$HERE/run-tests.sh" > "$REPO/build/publish-tests.log" 2>&1 || {
+        tail -30 "$REPO/build/publish-tests.log"
+        echo "error: self-tests failed; nothing published (log: build/publish-tests.log)" >&2
+        exit 1
+    }
+    echo "   all passed"
+fi
+
 head="$(git rev-parse HEAD)"
 short="$(git rev-parse --short HEAD)"
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then

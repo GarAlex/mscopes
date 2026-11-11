@@ -32,6 +32,9 @@ final class PictureModel: ObservableObject {
     @Published var smoothLines: Bool { didSet { engine.smoothLines = smoothLines; save() } }
     @Published var highResolution: Bool { didSet { engine.highResolution = highResolution; save() } }
     @Published var classicEnhanced: Bool { didSet { engine.classicEnhanced = classicEnhanced; save() } }
+    /// High resolution is on but the current preset was dropped back to one
+    /// pixel per point to keep 60 fps (set by EngineModel's refresh).
+    @Published var highResReduced = false
     @Published var hdrHighlights: Bool { didSet { engine.hdrHighlights = hdrHighlights; save() } }
     @Published var lastError: String?
 

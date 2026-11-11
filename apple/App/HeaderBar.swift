@@ -93,6 +93,9 @@ struct HeaderButton: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(help)
+        // VoiceOver reads the tooltip without its keyboard shortcut.
+        .accessibilityLabel(Text(help.replacingOccurrences(of: #"\s*\(.*\)$"#, with: "",
+                                                            options: .regularExpression)))
     }
 }
 

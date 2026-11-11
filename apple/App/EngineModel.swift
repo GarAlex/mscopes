@@ -25,6 +25,38 @@ final class EngineModel: ObservableObject {
     let levels = LevelsModel()
     @Published var lastError: String?
 
+    // --- Audio status shown over the visuals (AudioStatusViews.swift) -------
+    /// The first-launch explanation has been seen (or this Mac used MScopes
+    /// before it existed): capture starts when the window opens.
+    @Published var audioIntroSeen: Bool = EngineModel.introAlreadySeen() {
+        didSet { UserDefaults.standard.set(audioIntroSeen, forKey: "audio.introSeen") }
+    }
+    /// Capturing, but nothing heard since it started: show a hint to play
+    /// something. Never shown again once any audio has arrived this session,
+    /// so pausing the music later doesn't bring it back.
+    @Published var showListenHint = false
+    private var heardAudio = false
+    private var captureStartedAt = Date()
+
+    private static func introAlreadySeen() -> Bool {
+        // MSCOPES_SHOW_INTRO=1 shows it anyway (to check it; nothing is saved
+        // until its button is pressed).
+        if ProcessInfo.processInfo.environment["MSCOPES_SHOW_INTRO"] != nil { return false }
+        let d = UserDefaults.standard
+        if d.bool(forKey: "audio.introSeen") { return true }
+        // Settings from an earlier version mean the permission was already
+        // asked for; don't explain it again.
+        return ["chrome.normalFrame", "picture.look", "showSidebar", "widgetMode", "albumRootPath"]
+            .contains { d.object(forKey: $0) != nil }
+    }
+
+    /// Privacy & Security ▸ Screen & System Audio Recording.
+    func openAudioPrivacySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     // Controls bound to the UI.
     @Published var sensitivity: Float = 1.0 { didSet { engine.sensitivity = sensitivity } }
     // 0 stretch (classic AVS), 1 fill (round shapes; default), 2 fit
@@ -87,6 +119,22 @@ final class EngineModel: ObservableObject {
 
         albumRootPath = UserDefaults.standard.string(forKey: "albumRootPath")
         if albumRootPath != nil { scanAlbums() }
+    }
+
+    /// Open a dropped or Finder-opened file: an .avs or MScopes .json preset
+    /// plays, a .cube becomes the custom look. Returns false for anything else.
+    @discardableResult
+    func open(_ url: URL) -> Bool {
+        switch url.pathExtension.lowercased() {
+        case "avs", "json":
+            loadAvsFile(url)
+            return true
+        case "cube":
+            picture.loadCustomLook(url)
+            return true
+        default:
+            return false                 // a drop of anything else is refused
+        }
     }
 
     private func syncEffects() {
@@ -461,6 +509,10 @@ final class EngineModel: ObservableObject {
     }
 
     func start() {
+        audioIntroSeen = true
+        heardAudio = false
+        showListenHint = false
+        captureStartedAt = Date()
         do {
             try engine.start()          // ObjC (BOOL, NSError**) imports as throwing
             capturing = true
@@ -493,6 +545,12 @@ final class EngineModel: ObservableObject {
             tapRestarts = engine.tapRestarts
             sampleRate = engine.sampleRate; channels = engine.channels
         }
+        if picture.highResReduced != engine.highResolutionReduced {
+            picture.highResReduced = engine.highResolutionReduced
+        }
+        if !heardAudio && engine.peak > 0.02 { heardAudio = true }
+        let hint = capturing && !heardAudio && Date().timeIntervalSince(captureStartedAt) > 4
+        if hint != showListenHint { showListenHint = hint }
         levels.peak = engine.peak
         levels.bass = engine.bass
         levels.mid = engine.mid

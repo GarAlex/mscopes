@@ -2,6 +2,7 @@
 // Presets.cpp — effect registry + built-in preset library.
 //
 #include "Presets.h"
+#include "SharedState.h"
 #include <set>
 #include "BuiltinEffects.h"
 #include "UtilEffects.h"
@@ -110,6 +111,14 @@ const std::map<std::string, EffectFactory>& effectRegistry()
         {"reaction_diffusion", make<ReactionDiffusionEffect>()},
     };
     return reg;
+}
+
+void swapSharedState(SharedState& s)
+{
+    eel::VM::swapShared(s.regs, s.gmegabuf);
+    for (int i = 0; i < 8; ++i) std::swap(globalBuffer(i), s.buffers[i]);
+    swapDelayBuffers(s.delays);
+    std::swap(lineMode(), s.lineMode);
 }
 
 void resetSharedState()
@@ -299,6 +308,7 @@ const std::vector<Preset>& builtinPresets()
 
 void applyPreset(EffectHost& host, const Preset& preset)
 {
+    host.activate();
     resetSharedState();
     host.clearEffects(!preset.inheritCanvas);
     host.inheritCanvas = preset.inheritCanvas;

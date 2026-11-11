@@ -380,6 +380,7 @@ bool loadJsonPreset(EffectHost& host, const std::string& json, std::string* err)
     const JVal* cv = root.get("canvas");
     bool inherit = cv && cv->kind == JVal::STR && cv->str == "inherit";
 
+    host.activate();
     resetSharedState();
     host.clearEffects(!inherit);
     host.inheritCanvas = inherit;

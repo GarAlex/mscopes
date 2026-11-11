@@ -13,7 +13,12 @@ struct MScopesApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                // Files opened from Finder (Open With, double-click, a drop on
+                // the Dock icon) go to this window instead of opening another.
+                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
+                .onOpenURL { url in model.open(url) }
         }
+        .handlesExternalEvents(matching: ["*"])
         .windowStyle(.hiddenTitleBar)   // our HeaderBar replaces it; see WindowChrome.swift
         .defaultSize(width: 940, height: 560)
         .commands { PresetCommands(model: model) }
@@ -63,3 +68,4 @@ struct PresetCommands: Commands {
         }
     }
 }
+

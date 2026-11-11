@@ -28,6 +28,7 @@ struct PictureControls: View {
                     Image(systemName: "folder")
                 }
                 .help("Load a .cube look from a photo or video tool")
+                .accessibilityLabel("Load a .cube look")
             }
             if let err = picture.lastError {
                 Text(err).font(.caption2).foregroundStyle(.red).lineLimit(2)
@@ -51,6 +52,11 @@ struct PictureControls: View {
             Toggle("High resolution", isOn: $picture.highResolution)
                 .font(.caption)
                 .help("Render at the screen's full resolution when the preset keeps 60 fps there")
+            if picture.highResolution && picture.highResReduced {
+                Text("Reduced for this preset to keep 60 fps")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .padding(.leading, 20)
+            }
             Toggle("HDR highlights", isOn: $picture.hdrHighlights)
                 .font(.caption)
                 .help("Light that would clip turns white-hot instead; on XDR screens it shines brighter than white. Built-in presets")

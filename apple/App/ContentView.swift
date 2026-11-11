@@ -30,7 +30,9 @@ struct ContentView: View {
         }
         .frame(minWidth: minSize.width, minHeight: minSize.height)
         .background(WindowChrome(widgetMode: widget))
-        .onAppear { model.start() }
+        // First launch waits for the explanation's button (AudioIntroView),
+        // so the system's permission prompt doesn't arrive unexplained.
+        .onAppear { if model.audioIntroSeen { model.start() } }
         .onDisappear { model.stop() }
         // Leaving macOS fullscreen (Esc or the green button) restores the controls.
         .onReceive(NotificationCenter.default.publisher(
@@ -51,6 +53,13 @@ struct ContentView: View {
         // Run under the (hidden) title bar too: the header replaces it and
         // must line up with the traffic lights, which live in that strip.
         .ignoresSafeArea()
+        .overlay { audioStatus }
+        .overlay(alignment: .bottom) {
+            if model.audioIntroSeen && model.capturing && model.showListenHint {
+                ListenHintView(compact: widget)
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: model.showListenHint)
         .overlay(alignment: .topTrailing) {
             if widget {
                 WidgetControls()
@@ -59,6 +68,11 @@ struct ContentView: View {
             }
         }
         .onHover { hoveringVisual = $0 }
+        // Drop an .avs or .json preset, or a .cube look, on the visuals.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first else { return false }
+            return model.open(url)
+        }
         .contextMenu {
             Button("Next Random Preset") { model.shuffleNext() }
             LookMenu(picture: model.picture)
@@ -70,6 +84,14 @@ struct ContentView: View {
                 Button(model.showSidebar ? "Hide Sidebar" : "Show Sidebar") { model.showSidebar.toggle() }
                 Button("Fullscreen") { enterFullscreen() }
             }
+        }
+    }
+
+    @ViewBuilder private var audioStatus: some View {
+        if !model.audioIntroSeen {
+            AudioIntroView(compact: widget)
+        } else if !model.capturing, let message = model.lastError {
+            AudioProblemView(message: message, compact: widget)
         }
     }
 

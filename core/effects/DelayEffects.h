@@ -26,6 +26,7 @@ struct FrameQueue {
 
 // Drop all frames held in the 6 global Multi Delay buffers (preset reset).
 void resetDelayBuffers();
+void swapDelayBuffers(FrameQueue (&queues)[6]);   // SharedState.h
 
 // Holden04: Video Delay — output the frame from N frames (or N beats) ago.
 class VideoDelayEffect : public Effect {

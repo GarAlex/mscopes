@@ -4,7 +4,9 @@
 // Model: effects run in order on `_cur`. Feedback effects read `_prev` (the
 // previous frame's final output). After the stack runs, `_cur` is snapshotted
 // into `_prev` for next frame. This mirrors AVS's framebuffer/fbout swap while
-// staying simple.
+// staying simple. `_prev` only exists while some effect reads it (a full
+// float frame is 62 MB at 2560x1600), and the snapshot is a GPU copy queued
+// with the frame when the GPU backend runs.
 //
 #pragma once
 #include "Effect.h"
@@ -12,6 +14,7 @@
 #include "GpuFx.h"
 #include "Profile.h"
 #include "LineMode.h"
+#include "SharedState.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -30,7 +33,14 @@ struct ParamBinding {
 
 class EffectHost {
 public:
+    EffectHost() = default;
+    EffectHost(const EffectHost&) = delete;
+    EffectHost& operator=(const EffectHost&) = delete;
     ~EffectHost() {
+        if (active() == this) {          // its state is in the shared storage
+            resetSharedState();
+            active() = nullptr;
+        }
         gpu::invalidateResident(&_cur);
         gpu::invalidateResident(&_prev);
         gpu::invalidateResident(&_outCur);
@@ -39,10 +49,39 @@ public:
     void resize(int w, int h) {
         if (w == _cur.w && h == _cur.h) return;
         _cur.resize(w, h);
-        _prev.resize(w, h);
+        if (!_prev.px.empty()) _prev.resize(w, h);
+    }
+
+    // Drawing is paused (the window can't be seen): give back what the next
+    // frame rebuilds by itself, the HDR overflow and the previous-frame copy
+    // (remade from the current frame, which is what it held). Preset state,
+    // the current frame and effects' own buffers stay.
+    void trimMemory() {
+        gpu::invalidateResident(&_overflow);
+        gpu::invalidateResident(&_prev);
+        _overflow = Framebuffer();
+        _prev = Framebuffer();
     }
 
     void add(std::unique_ptr<Effect> e) { _effects.push_back(std::move(e)); }
+
+    // Make this host's shared state (SharedState.h) the one effects see:
+    // the active host's state is parked in it and this host's brought in.
+    // renderFrame() and the preset loaders call it; so must anything else
+    // that reads or writes the shared state for this host (the registers).
+    void activate() {
+        EffectHost*& cur = active();
+        if (cur == this) return;
+        if (cur) {
+            cur->_parked = std::make_unique<SharedState>();
+            swapSharedState(*cur->_parked);      // its state out, a fresh one in
+        }
+        if (_parked) {
+            swapSharedState(*_parked);
+            _parked.reset();
+        }
+        cur = this;
+    }
 
     // Clears the stack — and by default the canvas too: feedback effects
     // recycle whatever is on screen indefinitely, so a normal preset must
@@ -93,11 +132,19 @@ public:
         _outgoing = std::move(_effects);
         _effects.clear();
         _bindings.clear();
+        // The outgoing stack keeps its registers, shared buffers and line
+        // mode (SharedState.h); the globals start fresh for the new preset.
+        _outShared = std::make_unique<SharedState>();
+        swapSharedState(*_outShared);
         gpu::syncToCpuForRead(_cur);          // the image may still be on-texture
         _outCur.resize(_cur.w, _cur.h);
-        _outPrev.resize(_cur.w, _cur.h);
         _outCur.px = _cur.px;
-        _outPrev.px = _prev.px;
+        if (!_prev.px.empty() && _prev.w == _cur.w && _prev.h == _cur.h) {
+            _outPrev.resize(_cur.w, _cur.h);
+            _outPrev.px = _prev.px;
+        } else {
+            _outPrev = Framebuffer();
+        }
         _fadeT = 0;
         _fadeDur = seconds;
     }
@@ -121,6 +168,7 @@ public:
     // (Custom BPM) can mutate it for the rest of this frame's stack without
     // touching the caller's data.
     const Framebuffer& renderFrame(const VizFrame& audio, const EffectContext& ctx) {
+        activate();
         _audio = audio;
         prof::beginFrame();
 
@@ -130,9 +178,16 @@ public:
         // without HDR. The previous frame's GPU work is complete here.
         DrawQuality& dq = drawQuality();
         if (dq.hdr) {
-            gpu::invalidateResident(&_overflow);
-            if (_overflow.w != _cur.w || _overflow.h != _cur.h) _overflow.resize(_cur.w, _cur.h);
-            else std::fill(_overflow.px.begin(), _overflow.px.end(), 0.f);
+            if (_overflow.w != _cur.w || _overflow.h != _cur.h) {
+                gpu::invalidateResident(&_overflow);
+                _overflow.resize(_cur.w, _cur.h);        // zero-filled
+            } else if (!gpu::clear(_overflow)) {
+                // No GPU: clear on the CPU. (The GPU clear is queued ahead of
+                // this frame's work; a CPU effect that writes the overflow
+                // first syncs, which completes it.)
+                gpu::invalidateResident(&_overflow);
+                std::fill(_overflow.px.begin(), _overflow.px.end(), 0.f);
+            }
             dq.overflow = &_overflow;
         } else {
             dq.overflow = nullptr;
@@ -149,6 +204,17 @@ public:
                         break;
                     }
 
+        // The previous frame only exists for effects that read it. When one
+        // starts to (a new preset, an effect switched on, a new size), the
+        // previous frame is what `_cur` still holds.
+        const bool wantPrev = anyUsesPrev(_effects);
+        if (wantPrev && (_prev.w != _cur.w || _prev.h != _cur.h || _prev.px.size() != _cur.px.size()))
+            prof::timed("(prev snapshot)", [&] { copyFrame(_prev, _cur); });
+        else if (!wantPrev && !_prev.px.empty()) {
+            gpu::invalidateResident(&_prev);
+            _prev = Framebuffer();
+        }
+
         for (auto& e : _effects) {
             if (!e->enabled) continue;
             // GPU effects keep the image on-texture between themselves; sync
@@ -156,35 +222,45 @@ public:
             if (!e->isGpu()) prof::timed("(gpu sync)", [&] { gpu::syncToCpu(_cur); });
             prof::timed(e->name(), [&] { e->render(_cur, _prev, _audio, ctx); });
         }
-        // The previous-frame snapshot only exists for effects that read it.
-        // Otherwise the frame can stay on-texture straight into present().
-        if (anyUsesPrev(_effects)) {
-            prof::timed("(gpu sync)", [&] { gpu::syncToCpuForRead(_cur); });
-            prof::timed("(prev snapshot)", [&] { _prev.px = _cur.px; });
-        }
+        if (wantPrev) prof::timed("(prev snapshot)", [&] { copyFrame(_prev, _cur); });
 
         // crossfade the outgoing stack during a preset transition
         if (!_outgoing.empty()) {
-            // Only one framebuffer is ever GPU-resident: bring _cur home
-            // before the outgoing stack claims the texture (the blend below
-            // writes _cur on the CPU anyway).
+            // The blend below writes _cur on the CPU: finish its GPU work.
             gpu::syncToCpu(_cur);
+            if (_outShared) swapSharedState(*_outShared);      // the outgoing preset's state in
+            const bool outWantsPrev = anyUsesPrev(_outgoing);
+            if (outWantsPrev && (_outPrev.w != _outCur.w || _outPrev.h != _outCur.h))
+                copyFrame(_outPrev, _outCur);
             for (auto& e : _outgoing) {
                 if (!e->enabled) continue;
                 if (!e->isGpu()) prof::timed("(gpu sync)", [&] { gpu::syncToCpu(_outCur); });
                 prof::timed(e->name(), [&] { e->render(_outCur, _outPrev, _audio, ctx); });
             }
+            if (outWantsPrev) copyFrame(_outPrev, _outCur);
             gpu::syncToCpuForRead(_outCur);
-            if (anyUsesPrev(_outgoing)) _outPrev.px = _outCur.px;
+            if (_outShared) swapSharedState(*_outShared);      // and back out
 
             _fadeT += ctx.dt / std::max(0.05, _fadeDur);
             float t = (float)std::min(1.0, _fadeT);
             t = t * t * (3.f - 2.f * t);              // smooth crossfade
-            if (_outCur.px.size() == _cur.px.size()) {
+            if (_outCur.w == _cur.w && _outCur.h == _cur.h) {
                 float* c = _cur.px.data();
                 const float* o = _outCur.px.data();
                 for (size_t i = 0; i < _cur.px.size(); ++i)
                     c[i] = o[i] + (c[i] - o[i]) * t;
+            } else if (_outCur.w > 0 && _outCur.h > 0) {
+                // The render size changed with the preset (High resolution
+                // applies to some presets and not others): scale the
+                // outgoing frame to the new size rather than cut.
+                const float sx = (float)_outCur.w / (float)_cur.w, sy = (float)_outCur.h / (float)_cur.h;
+                for (int y = 0; y < _cur.h; ++y)
+                    for (int x = 0; x < _cur.w; ++x) {
+                        float o[4];
+                        _outCur.sample((x + 0.5f) * sx - 0.5f, (y + 0.5f) * sy - 0.5f, o);
+                        float* c = _cur.at(x, y);
+                        for (int k = 0; k < 3; ++k) c[k] = o[k] + (c[k] - o[k]) * t;
+                    }
             }
             if (_fadeT >= 1.0) {
                 _outgoing.clear();           // effect dtors invalidate their own buffers
@@ -192,6 +268,7 @@ public:
                 gpu::invalidateResident(&_outPrev);
                 _outCur = Framebuffer();
                 _outPrev = Framebuffer();
+                _outShared.reset();
             }
         }
         return _cur;
@@ -212,6 +289,20 @@ public:
     std::vector<std::pair<std::string, double>> lastProfile() const { return prof::summary(); }
 
 private:
+    static EffectHost*& active() { static EffectHost* a = nullptr; return a; }
+
+    // dst = src, on the GPU when it can (queued: CPU readers flush first,
+    // as they must for any GPU-written frame), else on the CPU.
+    static void copyFrame(Framebuffer& dst, const Framebuffer& src) {
+        if (dst.w != src.w || dst.h != src.h || dst.px.size() != src.px.size()) {
+            gpu::invalidateResident(&dst);
+            dst.resize(src.w, src.h);
+        }
+        if (gpu::copy(dst, src)) return;
+        gpu::syncToCpuForRead(src);
+        dst.px = src.px;
+    }
+
     static bool anyUsesPrev(const std::vector<std::unique_ptr<Effect>>& fx) {
         for (const auto& e : fx) if (e->enabled && e->usesPrev()) return true;
         return false;
@@ -226,6 +317,8 @@ private:
     // preset-transition state
     std::vector<std::unique_ptr<Effect>> _outgoing;
     Framebuffer _outCur, _outPrev;
+    std::unique_ptr<SharedState> _outShared;   // the outgoing preset's shared state
+    std::unique_ptr<SharedState> _parked;      // this host's state while another is active
     double _fadeT = 0, _fadeDur = 0;
 };
 

@@ -122,6 +122,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// aside each frame and shown white-hot; on an extended-range (XDR) screen
 /// it shines above SDR white. Presets' own frames are unchanged. Default YES.
 @property (nonatomic) BOOL hdrHighlights;
+/// High resolution is on, but the current preset missed the frame budget at
+/// full resolution and was dropped back to one pixel per point.
+@property (nonatomic, readonly) BOOL highResolutionReduced;
 /// Load a .cube look. On success the look becomes the current one (lookIndex
 /// -1) and nil is returned; otherwise a short error message.
 - (nullable NSString *)loadCustomLookAtPath:(NSString *)path;

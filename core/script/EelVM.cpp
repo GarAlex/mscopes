@@ -64,6 +64,12 @@ static std::unordered_map<int, std::vector<double>>& gmegaPages()
 
 double* VM::gmegabufSlot(double index) { return bufSlot(gmegaPages(), index); }
 
+void VM::swapShared(double regs[100], std::unordered_map<int, std::vector<double>>& gmegabuf)
+{
+    for (int i = 0; i < 100; ++i) std::swap(g_regs[i], regs[i]);
+    gmegaPages().swap(gmegabuf);
+}
+
 void VM::resetShared()
 {
     for (double& r : g_regs) r = 0.0;

@@ -51,6 +51,11 @@ public:
     // deterministic instead of inheriting the previous preset's leftovers.
     static void resetShared();
 
+    // Exchange reg00-99 and gmegabuf with the caller's (SharedState.h):
+    // register contents are swapped in place, so compiled programs' pointers
+    // to them stay valid.
+    static void swapShared(double regs[100], std::unordered_map<int, std::vector<double>>& gmegabuf);
+
     // Optional host hooks (AVS audio access). Unset hooks return 0.
     std::function<double(double band, double width, double channel)> getosc;
     std::function<double(double band, double width, double channel)> getspec;

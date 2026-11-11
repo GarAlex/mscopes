@@ -124,6 +124,15 @@ and CMake, on any platform:
     build/cmake/vizrender presets/tests/05-set-render-mode.avs --audio song.wav --out frames
     build/cmake/vizrender --list             # built-in presets; --builtin "<name>" renders one
 
+The tests include golden references for what every preset looks like
+(`core/tests/golden/`; after an intended change, rewrite them with
+`build/cmake/golden_selftest presets/tests core/tests/golden build/golden --update`)
+and a run of the file parsers over thousands of damaged presets. To run them
+under AddressSanitizer and UndefinedBehaviorSanitizer, as CI does:
+
+    cmake -S . -B build/asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMSCOPES_SANITIZE=ON
+    cmake --build build/asan --parallel && ctest --test-dir build/asan
+
 The macOS app and the Music plugin are one XcodeGen project:
 
     brew install xcodegen cmake

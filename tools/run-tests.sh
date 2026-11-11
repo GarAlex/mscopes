@@ -39,6 +39,11 @@ else
     ctest --test-dir "$BUILD" --output-on-failure
 fi
 
+if [[ ${#names[@]} -eq 0 ]] && xcrun -sdk macosx -f metal > /dev/null 2>&1; then
+    echo "== Metal shaders (offline compile) =="
+    "$HERE/check-shaders.py" | tail -1
+fi
+
 if [[ $want_local -eq 1 && -d "$REPO/presets/classic" ]]; then
     echo "== local classic set (not tracked) =="
     mkdir -p "$BUILD/test-out/classic"

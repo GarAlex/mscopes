@@ -33,6 +33,25 @@ jobs:
         env:
           MSCOPES_NO_GPU: "1"
 
+  sanitizers:
+    # The engine opens presets and looks downloaded from the internet: run
+    # the self-tests (including parse, thousands of damaged files) with
+    # AddressSanitizer and UndefinedBehaviorSanitizer, which turn a silent
+    # out-of-bounds read or undefined operation into a failure.
+    name: engine (ASan + UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure
+        run: cmake -S . -B build/asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMSCOPES_SANITIZE=ON
+      - name: Build
+        run: cmake --build build/asan --parallel
+      - name: Self-tests
+        run: ctest --test-dir build/asan --output-on-failure
+        env:
+          MSCOPES_NO_GPU: "1"
+          UBSAN_OPTIONS: print_stacktrace=1
+
   app:
     name: macOS app + Music plugin (unsigned)
     runs-on: macos-15
@@ -43,6 +62,10 @@ jobs:
           brew install xcodegen
           xcodebuild -version
           xcodegen --version
+      - name: Metal shaders
+        # The GPU backend's shaders are compiled when the app runs; compile
+        # them here so an error fails CI instead of a user's Mac.
+        run: tools/check-shaders.py
       - name: Generate project
         run: cd apple && xcodegen generate
       - name: Build

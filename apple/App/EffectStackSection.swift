@@ -28,13 +28,13 @@ struct EffectStackSection: View {
                         Spacer()
                         Button { model.moveEffect(fx.id, delta: -1) } label: {
                             Image(systemName: "chevron.up")
-                        }.buttonStyle(.borderless).disabled(fx.id == 0)
+                        }.buttonStyle(.borderless).accessibilityLabel("Move \(fx.name) up").disabled(fx.id == 0)
                         Button { model.moveEffect(fx.id, delta: 1) } label: {
                             Image(systemName: "chevron.down")
-                        }.buttonStyle(.borderless).disabled(fx.id == model.effects.count - 1)
+                        }.buttonStyle(.borderless).accessibilityLabel("Move \(fx.name) down").disabled(fx.id == model.effects.count - 1)
                         Button { model.removeEffect(fx.id) } label: {
                             Image(systemName: "xmark.circle")
-                        }.buttonStyle(.borderless).foregroundStyle(.secondary)
+                        }.buttonStyle(.borderless).accessibilityLabel("Remove \(fx.name)").foregroundStyle(.secondary)
                     }
                     .font(.caption)
                 }

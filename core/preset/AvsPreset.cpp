@@ -686,6 +686,7 @@ bool loadAvsPreset(EffectHost& host, const uint8_t* data, size_t len,
         report.error = "not an AVS preset (bad magic)";
         return false;
     }
+    host.activate();
     resetSharedState();
     host.clearEffects(/*clearCanvas=*/false);   // decided after parsing
 

@@ -1,0 +1,30 @@
+# golden_selftest exact hashes, backend cpu, toolchain darwin-arm64-6059a869
+fixture:01-superscope-basic.avs	4581c04cde4465ac
+fixture:02-feedback-movement.avs	ca6e2283861ffd9a
+fixture:03-nested-list-blend-modes.avs	25775603daaaa9aa
+fixture:04-dynamic-movement.avs	6e21c6cd15bbe754
+fixture:05-set-render-mode.avs	1623ad066e3e2398
+fixture:06-buffer-save.avs	3921ae04b1a80924
+fixture:07-custom-bpm-onbeat.avs	5fdb4efde137d69d
+fixture:08-ape-components.avs	4e1e1d4c24bc4494
+fixture:09-scripted-transforms.avs	deb1f5197ec37fd7
+fixture:10-ignore-input-persistent-list.avs	38082cc4e6d95c46
+fixture:11-ancient-script-format.avs	3f8bef01bdbabf2f
+fixture:12-color-and-geometry-registry.avs	57c3ed70ac952083
+builtin:Classic Tunnel	d99c7a9af3f708a0
+builtin:Fire Storm	e148ed996d0adef2
+builtin:Deep Ocean	2f93a3a1b8251f63
+builtin:Starflight	6d298f442ba135a4
+builtin:Bare Scope	8c43cf21d81b65d9
+builtin:Neon Cathedral	28231f00efc5a5cf
+builtin:Ember Field	40f5fd8be4b773d8
+builtin:Warp Core	dc0c724c00a49eab
+builtin:Liquid Glass	d61b54a0fd8b79e7
+builtin:Neon Wire	9cfd4f62f17e6a23
+builtin:Duotone Noir	f8d934ca49ca331a
+builtin:Phosphor	9edfa38f680e5550
+builtin:Flow Field	cfcb1fcd55ea94de
+builtin:Ink	736dba464604089f
+builtin:Coral	1328c3b25741dc83
+builtin:Nebula	d23ed7f1dde685e6
+builtin:Aurora	d4a286c6f0231037

@@ -44,9 +44,6 @@ bool isModernEffectKey(const std::string& key);
 // Rebuild `host`'s stack from `preset`. Unknown effect types are skipped.
 void applyPreset(EffectHost& host, const Preset& preset);
 
-// Reset all process-global state presets can see (shared reg00-99, gmegabuf,
-// the 8 Buffer Save framebuffers, Multi Delay queues). Call when loading a
-// preset so results don't depend on what ran before.
-void resetSharedState();
+// resetSharedState(): see SharedState.h.
 
 } // namespace viz
